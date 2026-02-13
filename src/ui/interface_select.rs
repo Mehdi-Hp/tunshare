@@ -73,8 +73,8 @@ pub fn render_lan_selection(frame: &mut Frame, area: Rect, app: &App) {
     // Render VPN summary
     if let Some(vpn_idx) = app.selected_vpn {
         if let Some(vpn) = app.vpn_interfaces.get(vpn_idx) {
-            let effective_dns = app.effective_dns();
-            let dns_source = app.dns_source();
+            let effective_dns = app.dns.effective();
+            let dns_source = app.dns.source();
             render_selected_vpn_summary(frame, chunks[0], vpn, &effective_dns, dns_source);
         }
     }

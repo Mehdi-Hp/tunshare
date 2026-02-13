@@ -14,19 +14,19 @@ use crate::ui::widgets::Card;
 
 /// Render the single-line header with app title and status badge.
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let status_style = if app.sharing_active {
+    let status_style = if app.is_sharing() {
         styles::status_active()
     } else {
         styles::status_inactive()
     };
 
-    let status_icon = if app.sharing_active {
+    let status_icon = if app.is_sharing() {
         symbols::STATUS_ACTIVE
     } else {
         symbols::STATUS_INACTIVE
     };
 
-    let status_text = if app.sharing_active {
+    let status_text = if app.is_sharing() {
         match app.state {
             AppState::Active => "Active",
             _ => "Active",
@@ -168,7 +168,7 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
     // Draw hint below card
     let hint_y = card_area.y + card_area.height + 1;
     if hint_y < area.y + area.height {
-        let hint_text = if app.sharing_active {
+        let hint_text = if app.is_sharing() {
             "Press Enter to stop"
         } else {
             "Press Enter to start"
@@ -300,10 +300,10 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             }
         }
         MenuItem::SetDns => {
-            let value = if let Some(ref dns) = app.custom_dns {
+            let value = if let Some(ref dns) = app.dns.custom {
                 dns.clone()
             } else {
-                let effective = app.effective_dns();
+                let effective = app.dns.effective();
                 if effective.is_empty() {
                     "auto".to_string()
                 } else {
@@ -323,7 +323,7 @@ fn is_menu_item_disabled(item: &MenuItem, app: &App) -> bool {
 
 /// Render the DNS editing overlay (dispatches by mode).
 pub fn render_dns_edit(frame: &mut Frame, area: Rect, app: &App) {
-    match app.dns_edit_mode {
+    match app.dns.edit_mode {
         DnsEditMode::SelectingPreset => render_dns_preset_list(frame, area, app),
         DnsEditMode::CustomInput => render_dns_custom_input(frame, area, app),
     }
@@ -351,17 +351,17 @@ fn render_dns_preset_list(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // Current value line
-    let current_text = if let Some(ref dns) = app.custom_dns {
+    let current_text = if let Some(ref dns) = app.dns.custom {
         format!("Current: {} (custom)", dns)
     } else {
-        let effective = app.effective_dns();
+        let effective = app.dns.effective();
         if effective.is_empty() {
             "Current: none".to_string()
         } else {
             format!(
                 "Current: {} ({})",
                 effective.first().unwrap(),
-                app.dns_source()
+                app.dns.source()
             )
         }
     };
@@ -382,7 +382,7 @@ fn render_dns_preset_list(frame: &mut Frame, area: Rect, app: &App) {
             break;
         }
 
-        let is_selected = i == app.dns_preset_selected;
+        let is_selected = i == app.dns.preset_selected;
         let prefix = if is_selected {
             format!("  {}  ", symbols::SELECTED)
         } else {
@@ -457,7 +457,7 @@ fn render_dns_custom_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(hint), hint_area);
 
     // Input line with cursor
-    let input_display = format!("{}█", app.dns_input_buffer);
+    let input_display = format!("{}█", app.dns.input_buffer);
     let input_line = Line::from(vec![
         Span::styled("DNS: ", Style::default().fg(colors::TEXT_SECONDARY)),
         Span::styled(
@@ -473,7 +473,7 @@ fn render_dns_custom_input(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Render connection info when sharing is active — single merged card with diagram + config.
 pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
-    if !app.sharing_active {
+    if !app.is_sharing() {
         return;
     }
 
@@ -593,11 +593,11 @@ fn render_diagram_inner(
 
 /// Render config items as a vertical 2-column table (label left, value right).
 fn render_config_rows(frame: &mut Frame, inner: Rect, start_y: u16, gateway: &str, app: &App) {
-    let dns_servers = app.effective_dns();
-    let dns_source = app.dns_source();
-    let dhcp_active = app.dhcp_active;
-    let dhcp_range = &app.dhcp_range;
-    let natpmp_active = app.natpmp_active;
+    let dns_servers = app.dns.effective();
+    let dns_source = app.dns.source();
+    let dhcp_active = app.dhcp_active();
+    let dhcp_range = app.dhcp_range();
+    let natpmp_active = app.natpmp_active();
 
     let dns_str = if dns_servers.is_empty() {
         "none".to_string()
