@@ -140,7 +140,12 @@ async fn run_app() -> Result<()> {
 
             // Render loading indicator if operation is pending
             if let Some(pending_op) = &app.pending_op {
-                render_loading_indicator(frame, chunks[2], pending_op.display());
+                render_loading_indicator(
+                    frame,
+                    chunks[2],
+                    pending_op.display(),
+                    app.pending_elapsed(),
+                );
             }
 
             // Render debug panel overlay if enabled

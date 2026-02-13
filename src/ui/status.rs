@@ -174,9 +174,22 @@ fn parse_help_text(text: &str) -> Vec<Span<'static>> {
 }
 
 /// Render a loading indicator overlay with moon spinner.
-pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
+///
+/// If `elapsed` is provided, appends the elapsed seconds to the message
+/// (e.g. "Starting VPN sharing... (3s)").
+pub fn render_loading_indicator(
+    frame: &mut Frame,
+    area: Rect,
+    message: &str,
+    elapsed: Option<std::time::Duration>,
+) {
+    let display_msg = match elapsed {
+        Some(dur) => format!("{} ({}s)", message, dur.as_secs()),
+        None => message.to_string(),
+    };
+
     // Calculate centered popup area
-    let popup_width = (message.len() as u16 + 8).min(area.width.saturating_sub(4));
+    let popup_width = (display_msg.len() as u16 + 8).min(area.width.saturating_sub(4));
     let popup_height = 3;
 
     let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
@@ -212,7 +225,7 @@ pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
                 .fg(colors::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(message, Style::default().fg(colors::TEXT_PRIMARY)),
+        Span::styled(display_msg, Style::default().fg(colors::TEXT_PRIMARY)),
     ]))
     .alignment(Alignment::Center);
 

@@ -1,6 +1,7 @@
 //! IP forwarding control via sysctl.
 
 use crate::error::{Result, TunshareError};
+use std::process::Command as SyncCommand;
 use tokio::process::Command;
 
 /// Manages IP forwarding state.
@@ -51,10 +52,16 @@ impl IpForwarding {
         self.set_state(true).await
     }
 
-    /// Restore the original IP forwarding state.
+    /// Restore the original IP forwarding state (async wrapper).
+    /// Delegates to `restore_sync` via `spawn_blocking`.
     pub async fn restore(&mut self) -> Result<()> {
         if let Some(original) = self.original_state.take() {
-            self.set_state(original).await?;
+            tokio::task::spawn_blocking(move || set_state_sync(original))
+                .await
+                .map_err(|e| TunshareError::CommandFailed {
+                    command: "restore (spawn_blocking)".into(),
+                    message: e.to_string(),
+                })??;
         }
         Ok(())
     }
@@ -66,29 +73,12 @@ impl IpForwarding {
     }
 
     async fn set_state(&self, enabled: bool) -> Result<()> {
-        let value = if enabled { "1" } else { "0" };
-        let output = Command::new("sysctl")
-            .arg("-w")
-            .arg(format!("net.inet.ip.forwarding={}", value))
-            .output()
+        tokio::task::spawn_blocking(move || set_state_sync(enabled))
             .await
             .map_err(|e| TunshareError::CommandFailed {
-                command: format!("sysctl -w net.inet.ip.forwarding={}", value),
+                command: "set_state (spawn_blocking)".into(),
                 message: e.to_string(),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("Operation not permitted") || stderr.contains("Permission denied") {
-                return Err(TunshareError::PermissionDenied);
-            }
-            return Err(TunshareError::CommandFailed {
-                command: format!("sysctl -w net.inet.ip.forwarding={}", value),
-                message: stderr.to_string(),
-            });
-        }
-
-        Ok(())
+            })?
     }
 
     /// Returns whether we have saved the original state (meaning we've modified it).
@@ -96,17 +86,10 @@ impl IpForwarding {
         self.original_state.is_some()
     }
 
-    /// Synchronous restore for use in Drop - uses std::process::Command.
-    /// This is a fallback for when async restore isn't possible.
+    /// Synchronous restore for use in Drop.
     pub fn restore_sync(&mut self) {
-        use std::process::Command as SyncCommand;
-
         if let Some(original) = self.original_state.take() {
-            let value = if original { "1" } else { "0" };
-            let _ = SyncCommand::new("sysctl")
-                .arg("-w")
-                .arg(format!("net.inet.ip.forwarding={}", value))
-                .output();
+            let _ = set_state_sync(original);
         }
     }
 }
@@ -115,4 +98,31 @@ impl Default for IpForwarding {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Standalone sync implementation for setting IP forwarding state.
+/// Single source of truth for both sync and async paths.
+fn set_state_sync(enabled: bool) -> Result<()> {
+    let value = if enabled { "1" } else { "0" };
+    let output = SyncCommand::new("sysctl")
+        .arg("-w")
+        .arg(format!("net.inet.ip.forwarding={}", value))
+        .output()
+        .map_err(|e| TunshareError::CommandFailed {
+            command: format!("sysctl -w net.inet.ip.forwarding={}", value),
+            message: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Operation not permitted") || stderr.contains("Permission denied") {
+            return Err(TunshareError::PermissionDenied);
+        }
+        return Err(TunshareError::CommandFailed {
+            command: format!("sysctl -w net.inet.ip.forwarding={}", value),
+            message: stderr.to_string(),
+        });
+    }
+
+    Ok(())
 }

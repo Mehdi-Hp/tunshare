@@ -170,46 +170,19 @@ dhcp-authoritative
         Ok(())
     }
 
-    /// Stop any running DHCP server instance.
-    ///
-    /// This is an associated function (no `self`) because it operates on
-    /// well-known PID files and config paths, not instance state.
+    /// Stop any running DHCP server instance (async wrapper).
+    /// Delegates to `stop_sync` via `spawn_blocking`.
     pub async fn stop() -> Result<()> {
-        // Try to read PID and kill the process
-        if Path::new(DNSMASQ_PID_PATH).exists() {
-            if let Ok(pid_str) = fs::read_to_string(DNSMASQ_PID_PATH) {
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    // Send SIGTERM to dnsmasq
-                    let _ = Command::new("kill").arg(pid.to_string()).output().await;
-                }
-            }
-        }
-
-        // Also try pkill as a fallback (only our instance)
-        let _ = Command::new("pkill")
-            .args(["-f", &format!("dnsmasq.*{}", DNSMASQ_CONF_PATH)])
-            .output()
-            .await;
-
-        // Clean up files
-        for path in [DNSMASQ_CONF_PATH, DNSMASQ_PID_PATH, DNSMASQ_LEASE_PATH] {
-            if Path::new(path).exists() {
-                let _ = fs::remove_file(path);
-            }
-        }
-
+        tokio::task::spawn_blocking(Self::stop_sync)
+            .await
+            .map_err(|e| TunshareError::CommandFailed {
+                command: "dhcp stop (spawn_blocking)".into(),
+                message: e.to_string(),
+            })?;
         Ok(())
     }
 
-    /// Detach the server so `Drop` won't stop the daemon.
-    ///
-    /// Use this instead of `std::mem::forget` to keep the daemon running
-    /// after the `DhcpServer` value is dropped.
-    pub fn detach(&mut self) {
-        self.running = false;
-    }
-
-    /// Synchronous stop for use in Drop.
+    /// Synchronous stop. Single source of truth for DHCP cleanup.
     pub fn stop_sync() {
         // Try to read PID and kill the process
         if Path::new(DNSMASQ_PID_PATH).exists() {
@@ -230,14 +203,6 @@ dhcp-authoritative
             if Path::new(path).exists() {
                 let _ = fs::remove_file(path);
             }
-        }
-    }
-}
-
-impl Drop for DhcpServer {
-    fn drop(&mut self) {
-        if self.running {
-            Self::stop_sync();
         }
     }
 }
