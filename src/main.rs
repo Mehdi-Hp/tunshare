@@ -1,4 +1,4 @@
-//! VPN Sharing TUI for macOS
+//! tunshare - VPN Sharing TUI for macOS
 //!
 //! Routes internet traffic through a VPN and shares it via LAN to connected devices.
 //! Uses macOS's pf (packet filter) firewall for NAT.
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     // Check for root privileges
     if !is_root() {
         eprintln!("Error: This program must be run as root (sudo).");
-        eprintln!("Usage: sudo ./vpn-share");
+        eprintln!("Usage: sudo tunshare");
         std::process::exit(1);
     }
 

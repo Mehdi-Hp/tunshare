@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A Rust TUI application for macOS that routes internet traffic through a VPN and shares it via LAN. Uses macOS's `pf` (packet filter) firewall for NAT and optionally `dnsmasq` for DHCP.
+tunshare is a Rust TUI application for macOS that routes internet traffic through a VPN and shares it via LAN. Uses macOS's `pf` (packet filter) firewall for NAT and optionally `dnsmasq` for DHCP.
 
 ## Commands
 
@@ -23,7 +23,7 @@ just clean          # Clean build artifacts
 just build-release  # Build optimized release
 just run            # Run existing release binary with sudo
 just run-release    # Build and run release with sudo
-sudo ./target/release/vpn-share  # Run directly
+sudo ./target/release/tunshare  # Run directly
 ```
 
 ## Architecture

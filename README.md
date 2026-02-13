@@ -1,10 +1,10 @@
-# vpn-share
+# tunshare
 
 A macOS TUI application that shares your VPN connection over LAN. Point other devices at your Mac and they get VPN-tunneled internet without needing their own VPN client.
 
 ## Why
 
-Some devices -- smart TVs, game consoles, IoT gadgets -- either can't run a VPN client or make it painfully annoying. vpn-share turns your Mac into a NAT gateway: it detects your VPN and LAN interfaces, configures macOS's `pf` firewall, and forwards traffic so any device on your local network can route through your VPN.
+Some devices -- smart TVs, game consoles, IoT gadgets -- either can't run a VPN client or make it painfully annoying. tunshare turns your Mac into a NAT gateway: it detects your VPN and LAN interfaces, configures macOS's `pf` firewall, and forwards traffic so any device on your local network can route through your VPN.
 
 ## Features
 
@@ -30,23 +30,23 @@ Some devices -- smart TVs, game consoles, IoT gadgets -- either can't run a VPN 
 
 ```bash
 brew tap Mehdi-Hp/tap
-brew install vpn-share
+brew install tunshare
 ```
 
 ### Build from source
 
 ```bash
-git clone https://github.com/Mehdi-Hp/vpn-share.git
-cd vpn-share
+git clone https://github.com/Mehdi-Hp/tunshare.git
+cd tunshare
 cargo build --release
 ```
 
-The binary is at `./target/release/vpn-share`.
+The binary is at `./target/release/tunshare`.
 
 ## Usage
 
 ```bash
-sudo vpn-share
+sudo tunshare
 ```
 
 ### Keyboard shortcuts
@@ -65,7 +65,7 @@ sudo vpn-share
 
 ### Workflow
 
-1. Launch with `sudo vpn-share`
+1. Launch with `sudo tunshare`
 2. Select **Start VPN Sharing** from the menu
 3. Pick your VPN interface (or let it auto-detect)
 4. Pick your LAN interface
