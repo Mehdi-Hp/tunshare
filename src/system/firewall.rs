@@ -1,6 +1,6 @@
 //! Packet filter (pf) firewall management.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
 use std::fs;
 use std::path::Path;
 use tokio::process::Command;
@@ -69,7 +69,7 @@ anchor "natpmp"
             .args(["-n", "-f", config_path])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -n -f".into(),
                 message: e.to_string(),
             })?;
@@ -87,7 +87,7 @@ anchor "natpmp"
                 || (stderr.contains("error") && !stderr.contains("0 errors"));
 
             if has_error {
-                return Err(VpnShareError::FirewallError(format!(
+                return Err(TunshareError::FirewallError(format!(
                     "Rule validation failed: {}",
                     stderr.trim()
                 )));
@@ -103,7 +103,7 @@ anchor "natpmp"
         let rules = Self::generate_rules(vpn_if, lan_if, 1400);
 
         // Write to temp file
-        fs::write(&self.config_path, &rules).map_err(VpnShareError::Io)?;
+        fs::write(&self.config_path, &rules).map_err(TunshareError::Io)?;
 
         // Validate first
         Self::validate_rules(&self.config_path).await?;
@@ -116,7 +116,7 @@ anchor "natpmp"
             .args(["-f", &self.config_path])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -f".into(),
                 message: e.to_string(),
             })?;
@@ -139,7 +139,7 @@ anchor "natpmp"
                 || stderr.contains("no valid");
 
             if has_real_error && !is_just_warning {
-                return Err(VpnShareError::FirewallError(format!(
+                return Err(TunshareError::FirewallError(format!(
                     "Failed to load rules: {}",
                     stderr.trim()
                 )));
@@ -172,7 +172,7 @@ anchor "natpmp"
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(VpnShareError::FirewallError(errors.join("; ")))
+            Err(TunshareError::FirewallError(errors.join("; ")))
         }
     }
 
@@ -188,7 +188,7 @@ anchor "natpmp"
             .args(["-f", DEFAULT_PF_CONF])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: format!("pfctl -f {}", DEFAULT_PF_CONF),
                 message: e.to_string(),
             })?;
@@ -197,7 +197,7 @@ anchor "natpmp"
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Ignore certain expected messages
             if !stderr.contains("rules loaded") && stderr.contains("error") {
-                return Err(VpnShareError::FirewallError(format!(
+                return Err(TunshareError::FirewallError(format!(
                     "Failed to restore default rules: {}",
                     stderr
                 )));
@@ -215,7 +215,7 @@ anchor "natpmp"
             .args(["-sn"])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -sn".into(),
                 message: e.to_string(),
             })?;
@@ -225,7 +225,7 @@ anchor "natpmp"
             .args(["-sr"])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -sr".into(),
                 message: e.to_string(),
             })?;
@@ -253,7 +253,7 @@ anchor "natpmp"
             .args(["-ss"])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -ss".into(),
                 message: e.to_string(),
             })?;
@@ -267,7 +267,7 @@ anchor "natpmp"
             .args(["-si"])
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "pfctl -si".into(),
                 message: e.to_string(),
             })?;

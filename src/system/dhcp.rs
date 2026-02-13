@@ -1,7 +1,8 @@
 //! DHCP server management using dnsmasq for automatic router configuration.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command as SyncCommand;
 use tokio::process::Command;
@@ -17,18 +18,18 @@ pub struct DhcpServer {
     /// The LAN interface to serve DHCP on.
     interface: String,
     /// The gateway IP (Mac mini's LAN IP).
-    gateway_ip: String,
+    gateway_ip: Ipv4Addr,
     /// DNS servers to advertise to clients.
     dns_servers: Vec<String>,
 }
 
 impl DhcpServer {
     /// Create a new DHCP server instance.
-    pub fn new(interface: &str, gateway_ip: &str, dns_servers: Vec<String>) -> Self {
+    pub fn new(interface: &str, gateway_ip: Ipv4Addr, dns_servers: Vec<String>) -> Self {
         Self {
             running: false,
             interface: interface.to_string(),
-            gateway_ip: gateway_ip.to_string(),
+            gateway_ip,
             dns_servers,
         }
     }
@@ -66,24 +67,17 @@ impl DhcpServer {
 
     /// Calculate DHCP range from gateway IP.
     /// Given gateway 192.168.2.1, returns ("192.168.2.100", "192.168.2.150").
-    pub fn calculate_dhcp_range(gateway_ip: &str) -> Option<(String, String)> {
-        let parts: Vec<&str> = gateway_ip.split('.').collect();
-        if parts.len() != 4 {
-            return None;
-        }
-
-        // Use .100 to .150 range in the same subnet
-        let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-        Some((format!("{}.100", prefix), format!("{}.150", prefix)))
+    pub fn calculate_dhcp_range(gateway_ip: Ipv4Addr) -> (String, String) {
+        let o = gateway_ip.octets();
+        (
+            format!("{}.{}.{}.100", o[0], o[1], o[2]),
+            format!("{}.{}.{}.150", o[0], o[1], o[2]),
+        )
     }
 
     /// Generate dnsmasq configuration.
     fn generate_config(&self) -> String {
-        let (range_start, range_end) =
-            Self::calculate_dhcp_range(&self.gateway_ip).unwrap_or_else(|| {
-                // Fallback range
-                ("192.168.2.100".to_string(), "192.168.2.150".to_string())
-            });
+        let (range_start, range_end) = Self::calculate_dhcp_range(self.gateway_ip);
 
         let dns_option = if self.dns_servers.is_empty() {
             // Use gateway as DNS if no VPN DNS available
@@ -141,7 +135,7 @@ dhcp-authoritative
             return Ok(());
         }
 
-        let dnsmasq_path = Self::find_dnsmasq().ok_or_else(|| VpnShareError::CommandFailed {
+        let dnsmasq_path = Self::find_dnsmasq().ok_or_else(|| TunshareError::CommandFailed {
             command: "dnsmasq".into(),
             message: "dnsmasq is not installed. Install with: brew install dnsmasq".into(),
         })?;
@@ -151,7 +145,7 @@ dhcp-authoritative
 
         // Generate and write configuration
         let config = self.generate_config();
-        fs::write(DNSMASQ_CONF_PATH, &config).map_err(VpnShareError::Io)?;
+        fs::write(DNSMASQ_CONF_PATH, &config).map_err(TunshareError::Io)?;
 
         // Start dnsmasq (it will daemonize itself)
         let conf_arg = format!("--conf-file={}", DNSMASQ_CONF_PATH);
@@ -159,14 +153,14 @@ dhcp-authoritative
             .arg(&conf_arg)
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "dnsmasq".into(),
                 message: e.to_string(),
             })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VpnShareError::CommandFailed {
+            return Err(TunshareError::CommandFailed {
                 command: "dnsmasq".into(),
                 message: format!("Failed to start DHCP server: {}", stderr),
             });
@@ -254,25 +248,23 @@ mod tests {
 
     #[test]
     fn test_calculate_dhcp_range() {
-        let range = DhcpServer::calculate_dhcp_range("192.168.2.1");
+        let range = DhcpServer::calculate_dhcp_range(Ipv4Addr::new(192, 168, 2, 1));
         assert_eq!(
             range,
-            Some(("192.168.2.100".to_string(), "192.168.2.150".to_string()))
+            ("192.168.2.100".to_string(), "192.168.2.150".to_string())
         );
 
-        let range = DhcpServer::calculate_dhcp_range("10.0.0.1");
-        assert_eq!(
-            range,
-            Some(("10.0.0.100".to_string(), "10.0.0.150".to_string()))
-        );
-
-        let range = DhcpServer::calculate_dhcp_range("invalid");
-        assert_eq!(range, None);
+        let range = DhcpServer::calculate_dhcp_range(Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(range, ("10.0.0.100".to_string(), "10.0.0.150".to_string()));
     }
 
     #[test]
     fn test_generate_config() {
-        let server = DhcpServer::new("en0", "192.168.2.1", vec!["10.8.0.1".to_string()]);
+        let server = DhcpServer::new(
+            "en0",
+            Ipv4Addr::new(192, 168, 2, 1),
+            vec!["10.8.0.1".to_string()],
+        );
         let config = server.generate_config();
 
         assert!(config.contains("interface=en0"));

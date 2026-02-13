@@ -1,5 +1,8 @@
 //! Application state and message handling (Elm architecture) with async support.
 
+use std::collections::VecDeque;
+use std::net::{IpAddr, Ipv4Addr};
+
 use crate::error::Result;
 use crate::system::{
     detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns, dns::get_default_dns,
@@ -7,6 +10,9 @@ use crate::system::{
 };
 use crate::ui::status::LogEntryLevel;
 use tokio::sync::mpsc;
+
+/// Maximum number of log entries kept in memory.
+const MAX_LOG_ENTRIES: usize = 500;
 
 /// Debug information about current system state.
 #[derive(Debug, Clone, Default)]
@@ -156,8 +162,8 @@ pub struct App {
     pub dhcp_active: bool,
     /// DHCP range being served (start, end).
     pub dhcp_range: Option<(String, String)>,
-    /// Log entries for display.
-    pub logs: Vec<LogEntry>,
+    /// Log entries for display (bounded ring buffer).
+    pub logs: VecDeque<LogEntry>,
     /// Current UI state.
     pub state: AppState,
     /// Selected menu item index.
@@ -179,7 +185,7 @@ pub struct App {
     /// Cached LAN interface name for sharing operations.
     pending_lan_name: Option<String>,
     /// Cached LAN IP for display after sharing starts.
-    pending_lan_ip: Option<String>,
+    pending_lan_ip: Option<Ipv4Addr>,
     /// Whether to show debug panel.
     pub show_debug: bool,
     /// Cached debug information.
@@ -258,7 +264,7 @@ impl App {
             sharing_active: false,
             dhcp_active: false,
             dhcp_range: None,
-            logs: Vec::new(),
+            logs: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             state: AppState::Menu,
             selected_menu_item: 0,
             firewall: Firewall::new(),
@@ -409,15 +415,20 @@ impl App {
                     Ok(()) => {
                         self.sharing_active = true;
 
-                        let lan_ip = self
+                        let lan_ip_display = self
                             .pending_lan_ip
-                            .clone()
+                            .map(|ip| ip.to_string())
                             .unwrap_or_else(|| "unknown".into());
-                        self.log_success(format!("VPN sharing active! Gateway: {}", lan_ip));
+                        self.log_success(format!(
+                            "VPN sharing active! Gateway: {}",
+                            lan_ip_display
+                        ));
 
                         // Try to start DHCP server if enabled and dnsmasq is available
                         if self.dhcp_enabled && self.dnsmasq_installed {
-                            if let Some(lan_name) = self.pending_lan_name.clone() {
+                            if let (Some(lan_name), Some(lan_ip)) =
+                                (self.pending_lan_name.clone(), self.pending_lan_ip)
+                            {
                                 self.start_dhcp_async(lan_name, lan_ip);
                                 // Don't clear pending state yet - DHCP will do it
                                 return;
@@ -570,7 +581,7 @@ impl App {
             if let (Some(vpn_name), Some(lan_name), Some(lan_ip)) = (
                 self.pending_vpn_name.clone(),
                 self.pending_lan_name.clone(),
-                self.pending_lan_ip.clone(),
+                self.pending_lan_ip,
             ) {
                 self.start_natpmp_async(vpn_name, lan_name, lan_ip);
                 return true;
@@ -657,7 +668,12 @@ impl App {
     }
 
     /// Start VPN sharing (async).
-    fn start_sharing_async(&mut self, vpn_name: String, lan_name: String, lan_ip: Option<String>) {
+    fn start_sharing_async(
+        &mut self,
+        vpn_name: String,
+        lan_name: String,
+        lan_ip: Option<Ipv4Addr>,
+    ) {
         if self.pending_op.is_some() {
             return; // Already busy
         }
@@ -705,18 +721,18 @@ impl App {
     }
 
     /// Start DHCP server (async).
-    fn start_dhcp_async(&mut self, lan_name: String, lan_ip: String) {
+    fn start_dhcp_async(&mut self, lan_name: String, lan_ip: Ipv4Addr) {
         self.log_info("Starting DHCP server...");
         self.pending_op = Some(PendingOp::StartingDhcp);
 
         // Calculate and store the DHCP range
-        self.dhcp_range = DhcpServer::calculate_dhcp_range(&lan_ip);
+        self.dhcp_range = Some(DhcpServer::calculate_dhcp_range(lan_ip));
 
         let tx = self.op_tx.clone();
         let dns_servers = self.effective_dns();
 
         tokio::spawn(async move {
-            let mut dhcp = DhcpServer::new(&lan_name, &lan_ip, dns_servers);
+            let mut dhcp = DhcpServer::new(&lan_name, lan_ip, dns_servers);
             let result = dhcp.start().await;
 
             // Detach so Drop won't stop the daemon — it will be stopped
@@ -788,7 +804,7 @@ impl App {
             let result = if errors.is_empty() {
                 Ok(())
             } else {
-                Err(crate::error::VpnShareError::FirewallError(
+                Err(crate::error::TunshareError::FirewallError(
                     errors.join("; "),
                 ))
             };
@@ -888,15 +904,14 @@ impl App {
     }
 
     /// Start NAT-PMP server (async).
-    fn start_natpmp_async(&mut self, vpn_name: String, lan_name: String, lan_ip: String) {
+    fn start_natpmp_async(&mut self, vpn_name: String, lan_name: String, lan_ip: Ipv4Addr) {
         self.log_info("Starting NAT-PMP server...");
         self.pending_op = Some(PendingOp::StartingNatPmp);
 
         let tx = self.op_tx.clone();
 
         tokio::spawn(async move {
-            let lan_network = NatPmpServer::network_from_ip(&lan_ip)
-                .unwrap_or_else(|| "192.168.2.0/24".to_string());
+            let lan_network = NatPmpServer::network_from_ip(lan_ip);
             let server = NatPmpServer::new(&vpn_name, &lan_name, &lan_network);
             let result = server.start().await;
 
@@ -1042,7 +1057,7 @@ impl App {
                             self.start_sharing_async(
                                 vpn.name.clone(),
                                 lan.name.clone(),
-                                lan.ipv4_address.clone(),
+                                lan.ipv4_address,
                             );
                         }
                     }
@@ -1184,7 +1199,7 @@ impl App {
                 if input.is_empty() {
                     self.custom_dns = None;
                     self.log_info("DNS reset to auto-detect");
-                } else if is_valid_ip(&input) {
+                } else if input.parse::<IpAddr>().is_ok() {
                     self.custom_dns = Some(input.clone());
                     self.log_success(format!("Custom DNS set to {}", input));
                 } else {
@@ -1239,30 +1254,30 @@ impl App {
     }
 
     // Logging helpers
+
+    /// Append a log entry, evicting the oldest if at capacity.
+    fn push_log(&mut self, entry: LogEntry) {
+        if self.logs.len() >= MAX_LOG_ENTRIES {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(entry);
+    }
+
     fn log_info(&mut self, msg: impl Into<String>) {
-        self.logs.push(LogEntry::info(msg));
+        self.push_log(LogEntry::info(msg));
     }
 
     fn log_success(&mut self, msg: impl Into<String>) {
-        self.logs.push(LogEntry::success(msg));
+        self.push_log(LogEntry::success(msg));
     }
 
     fn log_warning(&mut self, msg: impl Into<String>) {
-        self.logs.push(LogEntry::warning(msg));
+        self.push_log(LogEntry::warning(msg));
     }
 
     fn log_error(&mut self, msg: impl Into<String>) {
-        self.logs.push(LogEntry::error(msg));
+        self.push_log(LogEntry::error(msg));
     }
-}
-
-/// Basic IPv4 address validation.
-fn is_valid_ip(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
 }
 
 impl Default for App {
