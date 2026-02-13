@@ -5,6 +5,7 @@
 
 mod app;
 mod error;
+mod session;
 mod system;
 mod ui;
 
@@ -113,7 +114,7 @@ async fn run_app() -> Result<()> {
             // Render main content based on state
             match app.state {
                 AppState::Menu => {
-                    if app.sharing_active {
+                    if app.is_sharing() {
                         if !app.show_debug {
                             render_connection_info(frame, chunks[2], &app);
                         }

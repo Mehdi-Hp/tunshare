@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use crate::error::Result;
+use crate::session::SharingSession;
 use crate::system::{
     detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns, dns::get_default_dns,
     DhcpServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer,
@@ -152,36 +153,79 @@ pub enum DnsEditMode {
     CustomInput,
 }
 
+/// DNS configuration and edit state.
+pub struct DnsConfig {
+    /// DNS servers discovered for the VPN.
+    pub vpn_servers: Vec<String>,
+    /// System default DNS servers.
+    pub system_servers: Vec<String>,
+    /// User-specified custom DNS server (overrides auto-detected).
+    pub custom: Option<String>,
+    /// Text input buffer for DNS editing.
+    pub input_buffer: String,
+    /// DNS edit sub-mode (preset list vs custom input).
+    pub edit_mode: DnsEditMode,
+    /// Selected index in the DNS preset list (0=Auto-detect, 1..N=presets, N+1=Custom...).
+    pub preset_selected: usize,
+}
+
+impl DnsConfig {
+    fn new() -> Self {
+        Self {
+            vpn_servers: Vec::new(),
+            system_servers: Vec::new(),
+            custom: None,
+            input_buffer: String::new(),
+            edit_mode: DnsEditMode::SelectingPreset,
+            preset_selected: 0,
+        }
+    }
+
+    /// Get the effective DNS servers (custom > vpn > system).
+    pub fn effective(&self) -> Vec<String> {
+        if let Some(ref dns) = self.custom {
+            vec![dns.clone()]
+        } else if !self.vpn_servers.is_empty() {
+            self.vpn_servers.clone()
+        } else {
+            self.system_servers.clone()
+        }
+    }
+
+    /// Get the source label for the current DNS.
+    pub fn source(&self) -> &'static str {
+        if self.custom.is_some() {
+            "custom"
+        } else if !self.vpn_servers.is_empty() {
+            "vpn"
+        } else if !self.system_servers.is_empty() {
+            "system"
+        } else {
+            "none"
+        }
+    }
+}
+
 /// Application state.
 pub struct App {
     /// Detected VPN interfaces.
     pub vpn_interfaces: Vec<InterfaceInfo>,
     /// Detected LAN interfaces.
     pub lan_interfaces: Vec<InterfaceInfo>,
-    /// DNS servers discovered for the VPN.
-    pub vpn_dns_servers: Vec<String>,
-    /// System default DNS servers.
-    pub system_dns_servers: Vec<String>,
+    /// DNS configuration and edit state.
+    pub dns: DnsConfig,
     /// Currently selected VPN interface index.
     pub selected_vpn: Option<usize>,
     /// Currently selected LAN interface index.
     pub selected_lan: Option<usize>,
-    /// Whether VPN sharing is currently active.
-    pub sharing_active: bool,
-    /// Whether DHCP server is active.
-    pub dhcp_active: bool,
-    /// DHCP range being served (start, end).
-    pub dhcp_range: Option<(String, String)>,
+    /// Active sharing session (None when not sharing).
+    pub session: Option<SharingSession>,
     /// Log entries for display (bounded ring buffer).
     pub logs: VecDeque<LogEntry>,
     /// Current UI state.
     pub state: AppState,
     /// Selected menu item index.
     pub selected_menu_item: usize,
-    /// Firewall manager.
-    firewall: Firewall,
-    /// IP forwarding manager.
-    ip_forwarding: IpForwarding,
     /// Whether the app should quit.
     pub should_quit: bool,
     /// Channel sender for async operation results.
@@ -192,12 +236,6 @@ pub struct App {
     pub pending_op: Option<PendingOp>,
     /// When the current pending operation started (for elapsed time display).
     pub pending_op_started: Option<Instant>,
-    /// Cached VPN interface name for sharing operations.
-    pending_vpn_name: Option<String>,
-    /// Cached LAN interface name for sharing operations.
-    pending_lan_name: Option<String>,
-    /// Cached LAN IP for display after sharing starts.
-    pending_lan_ip: Option<Ipv4Addr>,
     /// Whether to show debug panel.
     pub show_debug: bool,
     /// Cached debug information.
@@ -208,20 +246,8 @@ pub struct App {
     pub dhcp_enabled: bool,
     /// User preference: whether to start NAT-PMP when sharing (default: true).
     pub natpmp_enabled: bool,
-    /// Whether NAT-PMP server is active.
-    pub natpmp_active: bool,
-    /// Handle to the running NAT-PMP server (for shutdown signaling).
-    natpmp_server: Option<NatPmpServer>,
     /// Cached: is dnsmasq installed on this system.
     pub dnsmasq_installed: bool,
-    /// User-specified custom DNS server (overrides auto-detected).
-    pub custom_dns: Option<String>,
-    /// Text input buffer for DNS editing.
-    pub dns_input_buffer: String,
-    /// DNS edit sub-mode (preset list vs custom input).
-    pub dns_edit_mode: DnsEditMode,
-    /// Selected index in the DNS preset list (0=Auto-detect, 1..N=presets, N+1=Custom...).
-    pub dns_preset_selected: usize,
 }
 
 /// Log entry for the status panel.
@@ -269,38 +295,24 @@ impl App {
         let mut app = Self {
             vpn_interfaces: Vec::new(),
             lan_interfaces: Vec::new(),
-            vpn_dns_servers: Vec::new(),
-            system_dns_servers: Vec::new(),
+            dns: DnsConfig::new(),
             selected_vpn: None,
             selected_lan: None,
-            sharing_active: false,
-            dhcp_active: false,
-            dhcp_range: None,
+            session: None,
             logs: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             state: AppState::Menu,
             selected_menu_item: 0,
-            firewall: Firewall::new(),
-            ip_forwarding: IpForwarding::new(),
             should_quit: false,
             op_tx,
             op_rx,
             pending_op: None,
             pending_op_started: None,
-            pending_vpn_name: None,
-            pending_lan_name: None,
-            pending_lan_ip: None,
             show_debug: false,
             debug_info: None,
             logs_expanded: false,
-            dhcp_enabled: dnsmasq_available, // Default: ON if dnsmasq is installed
-            natpmp_enabled: true,            // Always available (native implementation)
-            natpmp_active: false,
-            natpmp_server: None,
+            dhcp_enabled: dnsmasq_available,
+            natpmp_enabled: true,
             dnsmasq_installed: dnsmasq_available,
-            custom_dns: None,
-            dns_input_buffer: String::new(),
-            dns_edit_mode: DnsEditMode::SelectingPreset,
-            dns_preset_selected: 0,
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -309,6 +321,26 @@ impl App {
             app.log_info("DHCP will be disabled; router needs manual IP config.");
         }
         app
+    }
+
+    /// Whether VPN sharing is currently active.
+    pub fn is_sharing(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Whether DHCP server is active (false if not sharing).
+    pub fn dhcp_active(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.dhcp_active)
+    }
+
+    /// Whether NAT-PMP server is active (false if not sharing).
+    pub fn natpmp_active(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.natpmp_active)
+    }
+
+    /// DHCP range (None if not sharing or DHCP inactive).
+    pub fn dhcp_range(&self) -> Option<&(String, String)> {
+        self.session.as_ref().and_then(|s| s.dhcp_range.as_ref())
     }
 
     /// Check if there's a pending operation (UI should show loading indicator).
@@ -467,11 +499,11 @@ impl App {
                         } else {
                             self.log_success(format!("VPN DNS: {}", servers.join(", ")));
                         }
-                        self.vpn_dns_servers = servers;
+                        self.dns.vpn_servers = servers;
                     }
                     Err(e) => {
                         self.log_warning(format!("VPN DNS discovery failed: {}", e));
-                        self.vpn_dns_servers.clear();
+                        self.dns.vpn_servers.clear();
                     }
                 }
 
@@ -480,10 +512,10 @@ impl App {
                         if !servers.is_empty() {
                             self.log_info(format!("System DNS: {}", servers.join(", ")));
                         }
-                        self.system_dns_servers = servers;
+                        self.dns.system_servers = servers;
                     }
                     Err(_) => {
-                        self.system_dns_servers.clear();
+                        self.dns.system_servers.clear();
                     }
                 }
 
@@ -502,8 +534,9 @@ impl App {
                 ip_forwarding,
             } => {
                 // ALWAYS restore managers to prevent Drop cleanup, even if cancelled
-                self.firewall = firewall;
-                self.ip_forwarding = ip_forwarding;
+                if let Some(ref mut session) = self.session {
+                    session.restore_managers(firewall, ip_forwarding);
+                }
 
                 // If the user cancelled, don't proceed with the startup flow
                 if self.pending_op != Some(PendingOp::StartingSharing) {
@@ -513,11 +546,10 @@ impl App {
 
                 match result {
                     Ok(()) => {
-                        self.sharing_active = true;
-
                         let lan_ip_display = self
-                            .pending_lan_ip
-                            .map(|ip| ip.to_string())
+                            .session
+                            .as_ref()
+                            .map(|s| s.lan_ip.to_string())
                             .unwrap_or_else(|| "unknown".into());
                         self.log_success(format!(
                             "VPN sharing active! Gateway: {}",
@@ -526,34 +558,29 @@ impl App {
 
                         // Try to start DHCP server if enabled and dnsmasq is available
                         if self.dhcp_enabled && self.dnsmasq_installed {
-                            if let (Some(lan_name), Some(lan_ip)) =
-                                (self.pending_lan_name.clone(), self.pending_lan_ip)
-                            {
+                            if let Some(session) = self.session.as_ref() {
+                                let lan_name = session.lan_name.clone();
+                                let lan_ip = session.lan_ip;
                                 self.start_dhcp_async(lan_name, lan_ip);
-                                // Don't clear pending state yet - DHCP will do it
                                 return;
                             }
                         } else if !self.dhcp_enabled {
                             self.log_info("DHCP disabled by user preference");
-                            {
-                                let eff = self.effective_dns();
-                                if !eff.is_empty() {
-                                    self.log_info(format!(
-                                        "Configure router manually - DNS: {}",
-                                        eff.join(", ")
-                                    ));
-                                }
+                            let eff = self.dns.effective();
+                            if !eff.is_empty() {
+                                self.log_info(format!(
+                                    "Configure router manually - DNS: {}",
+                                    eff.join(", ")
+                                ));
                             }
                         } else {
                             self.log_info("DHCP disabled (dnsmasq not installed)");
-                            {
-                                let eff = self.effective_dns();
-                                if !eff.is_empty() {
-                                    self.log_info(format!(
-                                        "Configure router manually - DNS: {}",
-                                        eff.join(", ")
-                                    ));
-                                }
+                            let eff = self.dns.effective();
+                            if !eff.is_empty() {
+                                self.log_info(format!(
+                                    "Configure router manually - DNS: {}",
+                                    eff.join(", ")
+                                ));
                             }
                         }
 
@@ -568,27 +595,31 @@ impl App {
                         self.log_error(format!("Failed to start sharing: {}", e));
                         self.clear_pending_op();
                         self.state = AppState::Menu;
-                        self.pending_vpn_name = None;
-                        self.pending_lan_name = None;
-                        self.pending_lan_ip = None;
+                        self.session = None;
                     }
                 }
             }
             AsyncOpResult::DhcpStarted { result } => {
                 match result {
                     Ok(()) => {
-                        self.dhcp_active = true;
-                        if let Some((start, end)) = &self.dhcp_range {
-                            self.log_success(format!("DHCP server active ({}-{})", start, end));
+                        let log_msg = if let Some(ref mut session) = self.session {
+                            session.dhcp_active = true;
+                            match &session.dhcp_range {
+                                Some((start, end)) => {
+                                    format!("DHCP server active ({}-{})", start, end)
+                                }
+                                None => "DHCP server active".to_string(),
+                            }
                         } else {
-                            self.log_success("DHCP server active");
-                        }
+                            "DHCP server active".to_string()
+                        };
+                        self.log_success(log_msg);
                         self.log_info("Router can now use DHCP on WAN interface");
                     }
                     Err(e) => {
                         self.log_warning(format!("DHCP server failed: {}", e));
                         self.log_info("Router needs manual IP configuration");
-                        let eff = self.effective_dns();
+                        let eff = self.dns.effective();
                         if !eff.is_empty() {
                             self.log_info(format!(
                                 "Configure router manually - DNS: {}",
@@ -608,8 +639,10 @@ impl App {
             AsyncOpResult::NatPmpStarted { result, server } => {
                 match result {
                     Ok(()) => {
-                        self.natpmp_active = true;
-                        self.natpmp_server = server;
+                        if let Some(ref mut session) = self.session {
+                            session.natpmp_active = true;
+                            session.set_natpmp_server(server);
+                        }
                         self.log_success("NAT-PMP server active");
                     }
                     Err(e) => {
@@ -624,9 +657,10 @@ impl App {
                 firewall,
                 ip_forwarding,
             } => {
-                // ALWAYS restore managers, even if cancelled
-                self.firewall = firewall;
-                self.ip_forwarding = ip_forwarding;
+                // Restore managers before dropping session (prevents double cleanup)
+                if let Some(ref mut session) = self.session {
+                    session.restore_managers(firewall, ip_forwarding);
+                }
                 self.clear_pending_op();
 
                 match result {
@@ -638,16 +672,12 @@ impl App {
                     }
                 }
 
-                self.sharing_active = false;
-                self.dhcp_active = false;
-                self.dhcp_range = None;
-                self.natpmp_active = false;
-                self.natpmp_server = None;
+                // Drop session (its Drop is a no-op because async cleanup already ran)
+                self.session = None;
                 self.state = AppState::Menu;
                 self.selected_menu_item = 0;
                 self.show_debug = false;
                 self.debug_info = None;
-                // Note: if should_quit is set, main loop will exit
             }
             AsyncOpResult::DebugInfoFetched { info } => {
                 self.clear_pending_op();
@@ -669,20 +699,16 @@ impl App {
     fn finish_startup(&mut self) {
         self.clear_pending_op();
         self.state = AppState::Active;
-        self.pending_vpn_name = None;
-        self.pending_lan_name = None;
-        self.pending_lan_ip = None;
     }
 
     /// Try to start NAT-PMP if enabled.
     /// Returns `true` if NAT-PMP startup was launched (caller should return early).
     fn maybe_start_natpmp(&mut self) -> bool {
         if self.natpmp_enabled {
-            if let (Some(vpn_name), Some(lan_name), Some(lan_ip)) = (
-                self.pending_vpn_name.clone(),
-                self.pending_lan_name.clone(),
-                self.pending_lan_ip,
-            ) {
+            if let Some(session) = self.session.as_ref() {
+                let vpn_name = session.vpn_name.clone();
+                let lan_name = session.lan_name.clone();
+                let lan_ip = session.lan_ip;
                 self.start_natpmp_async(vpn_name, lan_name, lan_ip);
                 return true;
             }
@@ -690,33 +716,9 @@ impl App {
         false
     }
 
-    /// Get the effective DNS servers (custom > vpn > system).
-    pub fn effective_dns(&self) -> Vec<String> {
-        if let Some(ref dns) = self.custom_dns {
-            vec![dns.clone()]
-        } else if !self.vpn_dns_servers.is_empty() {
-            self.vpn_dns_servers.clone()
-        } else {
-            self.system_dns_servers.clone()
-        }
-    }
-
-    /// Get the source label for the current DNS.
-    pub fn dns_source(&self) -> &'static str {
-        if self.custom_dns.is_some() {
-            "custom"
-        } else if !self.vpn_dns_servers.is_empty() {
-            "vpn"
-        } else if !self.system_dns_servers.is_empty() {
-            "system"
-        } else {
-            "none"
-        }
-    }
-
     /// Get the menu items based on current state.
     pub fn menu_items(&self) -> Vec<MenuItem> {
-        if self.sharing_active {
+        if self.is_sharing() {
             vec![MenuItem::StopSharing, MenuItem::Quit]
         } else {
             vec![
@@ -814,24 +816,28 @@ impl App {
             vpn_name, lan_name
         ));
         self.set_pending_op(PendingOp::StartingSharing);
-        self.pending_vpn_name = Some(vpn_name.clone());
-        self.pending_lan_name = Some(lan_name.clone());
-        self.pending_lan_ip = lan_ip;
+
+        // Create session with fresh managers
+        let lan_ip = lan_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
+        let mut session = SharingSession::new(
+            Firewall::new(),
+            IpForwarding::new(),
+            vpn_name.clone(),
+            lan_name.clone(),
+            lan_ip,
+        );
+
+        // Take managers out for async operation
+        let (mut firewall, mut ip_forwarding) = session.take_managers();
+        self.session = Some(session);
 
         let tx = self.op_tx.clone();
 
-        // Take ownership of managers for the async operation
-        let mut firewall = std::mem::take(&mut self.firewall);
-        let mut ip_forwarding = std::mem::take(&mut self.ip_forwarding);
-
         tokio::spawn(async move {
             let result = tokio::time::timeout(TIMEOUT_START_SHARING, async {
-                // Step 1: Enable IP forwarding
                 ip_forwarding.enable().await?;
 
-                // Step 2: Load firewall rules
                 if let Err(e) = firewall.load_rules(&vpn_name, &lan_name).await {
-                    // Rollback IP forwarding
                     let _ = ip_forwarding.restore().await;
                     return Err(e);
                 }
@@ -847,7 +853,6 @@ impl App {
                 )),
             };
 
-            // ALWAYS send managers back to avoid Drop cleanup
             let _ = tx.send(AsyncOpResult::SharingStarted {
                 result,
                 firewall,
@@ -861,11 +866,13 @@ impl App {
         self.log_info("Starting DHCP server...");
         self.set_pending_op(PendingOp::StartingDhcp);
 
-        // Calculate and store the DHCP range
-        self.dhcp_range = Some(DhcpServer::calculate_dhcp_range(lan_ip));
+        // Calculate and store the DHCP range on the session
+        if let Some(ref mut session) = self.session {
+            session.dhcp_range = Some(DhcpServer::calculate_dhcp_range(lan_ip));
+        }
 
         let tx = self.op_tx.clone();
-        let dns_servers = self.effective_dns();
+        let dns_servers = self.dns.effective();
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(TIMEOUT_START_DHCP, async {
@@ -892,7 +899,7 @@ impl App {
             return; // Already busy
         }
 
-        if !self.sharing_active {
+        if self.session.is_none() {
             self.log_warning("VPN sharing is not active");
             self.state = AppState::Menu;
             return;
@@ -901,19 +908,17 @@ impl App {
         self.log_info("Stopping VPN sharing...");
         self.set_pending_op(PendingOp::StoppingSharing);
 
-        let tx = self.op_tx.clone();
-        let dhcp_active = self.dhcp_active;
-        let natpmp_active = self.natpmp_active;
+        let session = self.session.as_mut().unwrap();
+        let dhcp_active = session.dhcp_active;
+        let natpmp_active = session.natpmp_active;
 
         // Signal NAT-PMP server to shut down before spawning the cleanup task
-        if let Some(ref server) = self.natpmp_server {
-            server.shutdown();
-        }
-        self.natpmp_server = None;
+        session.shutdown_natpmp();
 
         // Take ownership of managers for the async operation
-        let mut firewall = std::mem::take(&mut self.firewall);
-        let mut ip_forwarding = std::mem::take(&mut self.ip_forwarding);
+        let (mut firewall, mut ip_forwarding) = session.take_managers();
+
+        let tx = self.op_tx.clone();
 
         tokio::spawn(async move {
             let result = tokio::time::timeout(TIMEOUT_STOP_SHARING, async {
@@ -956,7 +961,6 @@ impl App {
                 )),
             };
 
-            // ALWAYS send managers back to avoid Drop cleanup
             let _ = tx.send(AsyncOpResult::SharingStopped {
                 result,
                 firewall,
@@ -974,10 +978,13 @@ impl App {
         self.set_pending_op(PendingOp::FetchingDebugInfo);
 
         let tx = self.op_tx.clone();
-        let ip_forwarding_modified = self.ip_forwarding.is_modified();
-        let dhcp_running = self.dhcp_active;
-        let dhcp_range = self.dhcp_range.clone();
-        let natpmp_running = self.natpmp_active;
+        let ip_forwarding_modified = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.ip_forwarding_is_modified());
+        let dhcp_running = self.dhcp_active();
+        let dhcp_range = self.dhcp_range().cloned();
+        let natpmp_running = self.natpmp_active();
 
         tokio::spawn(async move {
             let info = tokio::time::timeout(TIMEOUT_DEBUG_INFO, async {
@@ -1158,7 +1165,7 @@ impl App {
                 }
             }
             KeyCode::Char('q') => self.quit(),
-            KeyCode::Char('d') if self.sharing_active => {
+            KeyCode::Char('d') if self.is_sharing() => {
                 self.toggle_debug();
             }
             KeyCode::Char('l') => {
@@ -1279,12 +1286,12 @@ impl App {
 
     /// Start editing DNS.
     fn start_dns_edit(&mut self) {
-        self.dns_input_buffer = self.custom_dns.clone().unwrap_or_default();
-        self.dns_edit_mode = DnsEditMode::SelectingPreset;
+        self.dns.input_buffer = self.dns.custom.clone().unwrap_or_default();
+        self.dns.edit_mode = DnsEditMode::SelectingPreset;
         // Pre-select current DNS in the preset list
-        self.dns_preset_selected = if self.custom_dns.is_none() {
+        self.dns.preset_selected = if self.dns.custom.is_none() {
             0 // Auto-detect
-        } else if let Some(ref dns) = self.custom_dns {
+        } else if let Some(ref dns) = self.dns.custom {
             // Check if the custom DNS matches a preset
             DNS_PRESETS
                 .iter()
@@ -1299,7 +1306,7 @@ impl App {
 
     /// Handle key input during DNS editing (dispatches by mode).
     fn handle_dns_edit_key(&mut self, key: crossterm::event::KeyCode) {
-        match self.dns_edit_mode {
+        match self.dns.edit_mode {
             DnsEditMode::SelectingPreset => self.handle_dns_preset_key(key),
             DnsEditMode::CustomInput => self.handle_dns_custom_input_key(key),
         }
@@ -1317,36 +1324,36 @@ impl App {
         let count = self.dns_preset_count();
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.dns_preset_selected > 0 {
-                    self.dns_preset_selected -= 1;
+                if self.dns.preset_selected > 0 {
+                    self.dns.preset_selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.dns_preset_selected < count - 1 {
-                    self.dns_preset_selected += 1;
+                if self.dns.preset_selected < count - 1 {
+                    self.dns.preset_selected += 1;
                 }
             }
             KeyCode::Enter => {
-                let idx = self.dns_preset_selected;
+                let idx = self.dns.preset_selected;
                 if idx == 0 {
                     // Auto-detect
-                    self.custom_dns = None;
+                    self.dns.custom = None;
                     self.log_info("DNS reset to auto-detect");
                     self.state = AppState::Menu;
                 } else if idx <= DNS_PRESETS.len() {
                     // A preset
                     let preset = &DNS_PRESETS[idx - 1];
-                    self.custom_dns = Some(preset.ip.to_string());
+                    self.dns.custom = Some(preset.ip.to_string());
                     self.log_success(format!("DNS set to {} ({})", preset.ip, preset.name));
                     self.state = AppState::Menu;
                 } else {
                     // Custom...
-                    self.dns_edit_mode = DnsEditMode::CustomInput;
-                    self.dns_input_buffer = self.custom_dns.clone().unwrap_or_default();
+                    self.dns.edit_mode = DnsEditMode::CustomInput;
+                    self.dns.input_buffer = self.dns.custom.clone().unwrap_or_default();
                 }
             }
             KeyCode::Esc => {
-                self.dns_input_buffer.clear();
+                self.dns.input_buffer.clear();
                 self.state = AppState::Menu;
             }
             _ => {}
@@ -1361,29 +1368,29 @@ impl App {
             KeyCode::Char(c) => {
                 // Only allow digits, dots, and colons (for IPv6)
                 if c.is_ascii_digit() || c == '.' || c == ':' {
-                    self.dns_input_buffer.push(c);
+                    self.dns.input_buffer.push(c);
                 }
             }
             KeyCode::Backspace => {
-                self.dns_input_buffer.pop();
+                self.dns.input_buffer.pop();
             }
             KeyCode::Enter => {
-                let input = self.dns_input_buffer.trim().to_string();
+                let input = self.dns.input_buffer.trim().to_string();
                 if input.is_empty() {
-                    self.custom_dns = None;
+                    self.dns.custom = None;
                     self.log_info("DNS reset to auto-detect");
                 } else if input.parse::<IpAddr>().is_ok() {
-                    self.custom_dns = Some(input.clone());
+                    self.dns.custom = Some(input.clone());
                     self.log_success(format!("Custom DNS set to {}", input));
                 } else {
                     self.log_warning(format!("Invalid IP address: {}", input));
                 }
-                self.dns_input_buffer.clear();
+                self.dns.input_buffer.clear();
                 self.state = AppState::Menu;
             }
             KeyCode::Esc => {
                 // Go back to preset list
-                self.dns_edit_mode = DnsEditMode::SelectingPreset;
+                self.dns.edit_mode = DnsEditMode::SelectingPreset;
             }
             _ => {}
         }
@@ -1396,7 +1403,7 @@ impl App {
 
     /// Quit the application.
     fn quit(&mut self) {
-        if self.sharing_active {
+        if self.is_sharing() {
             self.should_quit = true;
             self.stop_sharing_async();
         } else {
@@ -1411,7 +1418,7 @@ impl App {
         }
 
         match self.state {
-            AppState::Menu if self.sharing_active => {
+            AppState::Menu if self.is_sharing() => {
                 "↑/↓: Navigate  Enter: Select  d: Debug  l: Logs  q: Quit"
             }
             AppState::Menu => "↑/↓: Navigate  Enter: Select  l: Logs  q: Quit",
@@ -1419,7 +1426,7 @@ impl App {
             AppState::SelectingLan => "↑/↓: Navigate  Enter: Select  ←: Back  Esc: Cancel",
             AppState::Active if self.show_debug => "d: Hide debug  s: Stop  l: Logs  q: Quit",
             AppState::Active => "s: Stop  d: Debug  l: Logs  q: Quit",
-            AppState::EditingDns => match self.dns_edit_mode {
+            AppState::EditingDns => match self.dns.edit_mode {
                 DnsEditMode::SelectingPreset => "↑/↓: Navigate  Enter: Select  Esc: Cancel",
                 DnsEditMode::CustomInput => "Enter: Save  Esc: Back  (empty = auto-detect)",
             },
@@ -1461,21 +1468,8 @@ impl Default for App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        // Ensure we clean up on drop using sync methods
-        if self.sharing_active {
-            // Stop NAT-PMP server if running (before firewall so anchor flush works)
-            if self.natpmp_active {
-                if let Some(ref server) = self.natpmp_server {
-                    server.shutdown();
-                }
-                NatPmpServer::stop_sync();
-            }
-            // Stop DHCP server if running
-            if self.dhcp_active {
-                DhcpServer::stop_sync();
-            }
-            self.firewall.cleanup_sync();
-            self.ip_forwarding.restore_sync();
-        }
+        // SharingSession::drop handles all cleanup in the correct order.
+        // Dropping `self.session` triggers it automatically.
+        drop(self.session.take());
     }
 }
