@@ -158,6 +158,20 @@ pub mod styles {
         Style::default().fg(colors::TEXT_SECONDARY)
     }
 
+    /// Style for degraded status badge (connection warning).
+    pub fn status_degraded() -> Style {
+        Style::default()
+            .fg(colors::WARNING)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Style for down status badge (connection lost).
+    pub fn status_down() -> Style {
+        Style::default()
+            .fg(colors::ERROR)
+            .add_modifier(Modifier::BOLD)
+    }
+
     /// Style for separator lines.
     pub fn separator() -> Style {
         Style::default().fg(colors::TEXT_SECONDARY)

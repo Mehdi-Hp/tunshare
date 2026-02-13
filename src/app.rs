@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
 use crate::error::Result;
+use crate::health::{self, HealthStatus};
 use crate::session::SharingSession;
 use crate::system::{
     detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns, dns::get_default_dns,
@@ -24,6 +26,10 @@ const TIMEOUT_START_DHCP: Duration = Duration::from_secs(5);
 const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
 const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
 const TIMEOUT_DEBUG_INFO: Duration = Duration::from_secs(5);
+const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(3);
+
+/// Interval between periodic health checks while sharing is active.
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Debug information about current system state.
 #[derive(Debug, Clone, Default)]
@@ -81,6 +87,8 @@ pub enum AsyncOpResult {
     },
     /// Debug info fetched.
     DebugInfoFetched { info: Result<DebugInfo> },
+    /// Periodic health check result.
+    HealthCheck { status: HealthStatus },
 }
 
 /// Pending async operation type (for UI display).
@@ -170,11 +178,11 @@ pub struct DnsConfig {
 }
 
 impl DnsConfig {
-    fn new() -> Self {
+    fn new(custom: Option<String>) -> Self {
         Self {
             vpn_servers: Vec::new(),
             system_servers: Vec::new(),
-            custom: None,
+            custom,
             input_buffer: String::new(),
             edit_mode: DnsEditMode::SelectingPreset,
             preset_selected: 0,
@@ -248,6 +256,8 @@ pub struct App {
     pub natpmp_enabled: bool,
     /// Cached: is dnsmasq installed on this system.
     pub dnsmasq_installed: bool,
+    /// Next scheduled health check time (None when not sharing).
+    next_health_check: Option<Instant>,
 }
 
 /// Log entry for the status panel.
@@ -289,13 +299,13 @@ impl App {
     pub fn new() -> Self {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
 
-        // Check for dnsmasq on startup
+        let config = Config::load();
         let dnsmasq_available = DhcpServer::is_dnsmasq_installed();
 
         let mut app = Self {
             vpn_interfaces: Vec::new(),
             lan_interfaces: Vec::new(),
-            dns: DnsConfig::new(),
+            dns: DnsConfig::new(config.custom_dns),
             selected_vpn: None,
             selected_lan: None,
             session: None,
@@ -310,9 +320,10 @@ impl App {
             show_debug: false,
             debug_info: None,
             logs_expanded: false,
-            dhcp_enabled: dnsmasq_available,
-            natpmp_enabled: true,
+            dhcp_enabled: config.dhcp_enabled && dnsmasq_available,
+            natpmp_enabled: config.natpmp_enabled,
             dnsmasq_installed: dnsmasq_available,
+            next_health_check: None,
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -341,6 +352,15 @@ impl App {
     /// DHCP range (None if not sharing or DHCP inactive).
     pub fn dhcp_range(&self) -> Option<&(String, String)> {
         self.session.as_ref().and_then(|s| s.dhcp_range.as_ref())
+    }
+
+    /// Connection health status (Healthy if not sharing).
+    pub fn health_status(&self) -> &HealthStatus {
+        static HEALTHY: HealthStatus = HealthStatus::Healthy;
+        self.session
+            .as_ref()
+            .map(|s| &s.health_status)
+            .unwrap_or(&HEALTHY)
     }
 
     /// Check if there's a pending operation (UI should show loading indicator).
@@ -405,6 +425,15 @@ impl App {
         while let Ok(result) = self.op_rx.try_recv() {
             self.handle_async_result(result);
         }
+
+        // Periodic health check while sharing is active
+        if self.is_sharing() && self.pending_op.is_none() {
+            if let Some(next) = self.next_health_check {
+                if Instant::now() >= next {
+                    self.spawn_health_check();
+                }
+            }
+        }
     }
 
     /// Check whether the incoming result matches the currently pending operation.
@@ -415,6 +444,8 @@ impl App {
             // These carry firewall/ip_forwarding -- always accept
             (AsyncOpResult::SharingStarted { .. }, _) => true,
             (AsyncOpResult::SharingStopped { .. }, _) => true,
+            // Health checks run outside the pending op system -- always accept
+            (AsyncOpResult::HealthCheck { .. }, _) => true,
             // Normal matching
             (AsyncOpResult::InterfacesDetected { .. }, Some(PendingOp::DetectingInterfaces)) => {
                 true
@@ -674,6 +705,7 @@ impl App {
 
                 // Drop session (its Drop is a no-op because async cleanup already ran)
                 self.session = None;
+                self.next_health_check = None;
                 self.state = AppState::Menu;
                 self.selected_menu_item = 0;
                 self.show_debug = false;
@@ -692,6 +724,33 @@ impl App {
                     }
                 }
             }
+            AsyncOpResult::HealthCheck { status } => {
+                // Only log when status changes to avoid spamming
+                let prev = self
+                    .session
+                    .as_ref()
+                    .map(|s| &s.health_status)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if status != prev {
+                    match &status {
+                        HealthStatus::Healthy => {
+                            self.log_success("Connection recovered");
+                        }
+                        HealthStatus::Degraded(reason) => {
+                            self.log_warning(format!("Connection degraded: {}", reason));
+                        }
+                        HealthStatus::Down(reason) => {
+                            self.log_error(format!("Connection down: {}", reason));
+                        }
+                    }
+                }
+
+                if let Some(ref mut session) = self.session {
+                    session.health_status = status;
+                }
+            }
         }
     }
 
@@ -699,6 +758,8 @@ impl App {
     fn finish_startup(&mut self) {
         self.clear_pending_op();
         self.state = AppState::Active;
+        // Start periodic health checks
+        self.next_health_check = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
     }
 
     /// Try to start NAT-PMP if enabled.
@@ -1028,6 +1089,28 @@ impl App {
         });
     }
 
+    /// Spawn a one-shot health check (no PendingOp — completely non-blocking).
+    fn spawn_health_check(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+
+        let tx = self.op_tx.clone();
+        let vpn_name = session.vpn_name.clone();
+
+        // Bump the timer regardless of outcome
+        self.next_health_check = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
+
+        tokio::spawn(async move {
+            let status =
+                tokio::time::timeout(TIMEOUT_HEALTH_CHECK, health::check_health(&vpn_name))
+                    .await
+                    .unwrap_or(HealthStatus::Healthy); // Timeout = assume OK
+
+            let _ = tx.send(AsyncOpResult::HealthCheck { status });
+        });
+    }
+
     /// Toggle debug panel visibility.
     fn toggle_debug(&mut self) {
         self.show_debug = !self.show_debug;
@@ -1052,6 +1135,7 @@ impl App {
         } else {
             self.log_info("DHCP server disabled (manual router config required)");
         }
+        self.save_preferences();
     }
 
     /// Toggle NAT-PMP server preference (only when sharing is inactive).
@@ -1062,6 +1146,7 @@ impl App {
         } else {
             self.log_info("NAT-PMP server disabled");
         }
+        self.save_preferences();
     }
 
     /// Start NAT-PMP server (async).
@@ -1339,12 +1424,14 @@ impl App {
                     // Auto-detect
                     self.dns.custom = None;
                     self.log_info("DNS reset to auto-detect");
+                    self.save_preferences();
                     self.state = AppState::Menu;
                 } else if idx <= DNS_PRESETS.len() {
                     // A preset
                     let preset = &DNS_PRESETS[idx - 1];
                     self.dns.custom = Some(preset.ip.to_string());
                     self.log_success(format!("DNS set to {} ({})", preset.ip, preset.name));
+                    self.save_preferences();
                     self.state = AppState::Menu;
                 } else {
                     // Custom...
@@ -1386,6 +1473,7 @@ impl App {
                     self.log_warning(format!("Invalid IP address: {}", input));
                 }
                 self.dns.input_buffer.clear();
+                self.save_preferences();
                 self.state = AppState::Menu;
             }
             KeyCode::Esc => {
@@ -1431,6 +1519,18 @@ impl App {
                 DnsEditMode::CustomInput => "Enter: Save  Esc: Back  (empty = auto-detect)",
             },
         }
+    }
+
+    // Persistence
+
+    /// Save current preferences to config file.
+    fn save_preferences(&self) {
+        Config {
+            dhcp_enabled: self.dhcp_enabled,
+            natpmp_enabled: self.natpmp_enabled,
+            custom_dns: self.dns.custom.clone(),
+        }
+        .save();
     }
 
     // Logging helpers

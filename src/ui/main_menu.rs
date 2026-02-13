@@ -9,33 +9,24 @@ use ratatui::{
 };
 
 use crate::app::{App, AppState, DnsEditMode, MenuItem, DNS_PRESETS};
+use crate::health::HealthStatus;
 use crate::ui::theme::{borders, colors, styles, symbols};
 use crate::ui::widgets::Card;
 
 /// Render the single-line header with app title and status badge.
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let status_style = if app.is_sharing() {
-        styles::status_active()
-    } else {
-        styles::status_inactive()
-    };
-
-    let status_icon = if app.is_sharing() {
-        symbols::STATUS_ACTIVE
-    } else {
-        symbols::STATUS_INACTIVE
-    };
-
-    let status_text = if app.is_sharing() {
-        match app.state {
-            AppState::Active => "Active",
-            _ => "Active",
+    let (status_text, status_style, status_icon) = if app.is_sharing() {
+        match app.health_status() {
+            HealthStatus::Healthy => ("Active", styles::status_active(), symbols::STATUS_ACTIVE),
+            HealthStatus::Degraded(_) => ("Degraded", styles::status_degraded(), symbols::WARNING),
+            HealthStatus::Down(_) => ("VPN Down", styles::status_down(), symbols::ERROR),
         }
     } else {
-        match app.state {
+        let text = match app.state {
             AppState::SelectingVpn | AppState::SelectingLan | AppState::EditingDns => "Configuring",
             _ => "Inactive",
-        }
+        };
+        (text, styles::status_inactive(), symbols::STATUS_INACTIVE)
     };
 
     // Build the header line

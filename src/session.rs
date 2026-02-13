@@ -2,6 +2,7 @@
 
 use std::net::Ipv4Addr;
 
+use crate::health::HealthStatus;
 use crate::system::{DhcpServer, Firewall, IpForwarding, NatPmpServer};
 
 /// Represents an active VPN sharing session.
@@ -32,6 +33,8 @@ pub struct SharingSession {
     pub natpmp_active: bool,
     /// Handle to the running NAT-PMP server (for shutdown signaling).
     natpmp_server: Option<NatPmpServer>,
+    /// Connection health status (updated by periodic checks).
+    pub health_status: HealthStatus,
 }
 
 impl SharingSession {
@@ -53,6 +56,7 @@ impl SharingSession {
             dhcp_range: None,
             natpmp_active: false,
             natpmp_server: None,
+            health_status: HealthStatus::default(),
         }
     }
 
