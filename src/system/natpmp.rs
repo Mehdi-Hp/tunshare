@@ -162,16 +162,19 @@ impl NatPmpServer {
         let _ = self.shutdown_tx.send(true);
     }
 
-    /// Flush all NAT-PMP pf anchor rules (async, no instance needed).
+    /// Flush all NAT-PMP pf anchor rules (async wrapper).
+    /// Delegates to `stop_sync` via `spawn_blocking`.
     pub async fn stop() -> Result<()> {
-        let _ = Command::new("pfctl")
-            .args(["-a", PF_ANCHOR_NAME, "-F", "all"])
-            .output()
-            .await;
+        tokio::task::spawn_blocking(Self::stop_sync)
+            .await
+            .map_err(|e| TunshareError::CommandFailed {
+                command: "natpmp stop (spawn_blocking)".into(),
+                message: e.to_string(),
+            })?;
         Ok(())
     }
 
-    /// Synchronous flush for use in Drop.
+    /// Synchronous flush. Single source of truth for NAT-PMP cleanup.
     pub fn stop_sync() {
         let _ = SyncCommand::new("pfctl")
             .args(["-a", PF_ANCHOR_NAME, "-F", "all"])

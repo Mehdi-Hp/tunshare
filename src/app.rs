@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::{Duration, Instant};
 
 use crate::error::Result;
 use crate::system::{
@@ -13,6 +14,15 @@ use tokio::sync::mpsc;
 
 /// Maximum number of log entries kept in memory.
 const MAX_LOG_ENTRIES: usize = 500;
+
+/// Timeout durations for async operations.
+const TIMEOUT_INTERFACES: Duration = Duration::from_secs(10);
+const TIMEOUT_DNS: Duration = Duration::from_secs(5);
+const TIMEOUT_START_SHARING: Duration = Duration::from_secs(10);
+const TIMEOUT_START_DHCP: Duration = Duration::from_secs(5);
+const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
+const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
+const TIMEOUT_DEBUG_INFO: Duration = Duration::from_secs(5);
 
 /// Debug information about current system state.
 #[derive(Debug, Clone, Default)]
@@ -180,6 +190,8 @@ pub struct App {
     op_rx: mpsc::UnboundedReceiver<AsyncOpResult>,
     /// Currently pending async operation.
     pub pending_op: Option<PendingOp>,
+    /// When the current pending operation started (for elapsed time display).
+    pub pending_op_started: Option<Instant>,
     /// Cached VPN interface name for sharing operations.
     pending_vpn_name: Option<String>,
     /// Cached LAN interface name for sharing operations.
@@ -273,6 +285,7 @@ impl App {
             op_tx,
             op_rx,
             pending_op: None,
+            pending_op_started: None,
             pending_vpn_name: None,
             pending_lan_name: None,
             pending_lan_ip: None,
@@ -304,6 +317,57 @@ impl App {
         self.pending_op.is_some()
     }
 
+    /// Set the pending operation and record its start time.
+    fn set_pending_op(&mut self, op: PendingOp) {
+        self.pending_op = Some(op);
+        self.pending_op_started = Some(Instant::now());
+    }
+
+    /// Clear the pending operation and its start time.
+    fn clear_pending_op(&mut self) {
+        self.pending_op = None;
+        self.pending_op_started = None;
+    }
+
+    /// Get elapsed time since the pending operation started.
+    pub fn pending_elapsed(&self) -> Option<Duration> {
+        self.pending_op_started.map(|start| start.elapsed())
+    }
+
+    /// Cancel the currently pending operation.
+    /// The spawned tokio task will still run to completion, but its result
+    /// will be detected as stale and discarded (except SharingStarted/SharingStopped
+    /// which always restore firewall/ip_forwarding ownership).
+    fn cancel_pending_op(&mut self) {
+        if let Some(op) = self.pending_op {
+            self.log_warning(format!("Cancelled: {}", op.display()));
+            self.clear_pending_op();
+
+            // Return to an appropriate state
+            match op {
+                PendingOp::DetectingInterfaces => {
+                    self.state = AppState::Menu;
+                }
+                PendingOp::DiscoveringDns => {
+                    self.state = AppState::SelectingVpn;
+                }
+                PendingOp::StartingSharing
+                | PendingOp::StartingDhcp
+                | PendingOp::StartingNatPmp => {
+                    // If sharing was already marked active (e.g. DHCP/NAT-PMP phase), stay in Menu
+                    self.state = AppState::Menu;
+                }
+                PendingOp::StoppingSharing => {
+                    // Can't really undo a stop -- stay in current state, result will arrive
+                    // and handle cleanup via the always-restore path for SharingStopped
+                }
+                PendingOp::FetchingDebugInfo => {
+                    // Just dismiss, stay where we are
+                }
+            }
+        }
+    }
+
     /// Poll for async operation results. Call this from the main loop.
     pub fn poll_async_results(&mut self) {
         while let Ok(result) = self.op_rx.try_recv() {
@@ -311,11 +375,41 @@ impl App {
         }
     }
 
+    /// Check whether the incoming result matches the currently pending operation.
+    /// SharingStarted/SharingStopped always match because we must restore ownership
+    /// of firewall/ip_forwarding regardless.
+    fn result_matches_pending(&self, result: &AsyncOpResult) -> bool {
+        match (result, self.pending_op) {
+            // These carry firewall/ip_forwarding -- always accept
+            (AsyncOpResult::SharingStarted { .. }, _) => true,
+            (AsyncOpResult::SharingStopped { .. }, _) => true,
+            // Normal matching
+            (AsyncOpResult::InterfacesDetected { .. }, Some(PendingOp::DetectingInterfaces)) => {
+                true
+            }
+            (AsyncOpResult::DnsDiscovered { .. }, Some(PendingOp::DiscoveringDns)) => true,
+            (AsyncOpResult::DhcpStarted { .. }, Some(PendingOp::StartingDhcp)) => true,
+            (AsyncOpResult::NatPmpStarted { .. }, Some(PendingOp::StartingNatPmp)) => true,
+            (AsyncOpResult::DebugInfoFetched { .. }, Some(PendingOp::FetchingDebugInfo)) => true,
+            _ => false,
+        }
+    }
+
     /// Handle a completed async operation.
     fn handle_async_result(&mut self, result: AsyncOpResult) {
+        // Guard against stale results (user cancelled, or a different op is now pending).
+        // SharingStarted/SharingStopped are exempt because we must always restore
+        // firewall/ip_forwarding ownership to prevent Drop cleanup.
+        if !self.result_matches_pending(&result) {
+            // For SharingStarted/SharingStopped the match above returns true,
+            // so we only reach here for truly stale lightweight results.
+            self.log_info("Discarded stale async result");
+            return;
+        }
+
         match result {
             AsyncOpResult::InterfacesDetected { vpn, lan } => {
-                self.pending_op = None;
+                self.clear_pending_op();
 
                 match vpn {
                     Ok(interfaces) => {
@@ -364,7 +458,7 @@ impl App {
                 vpn_servers,
                 system_servers,
             } => {
-                self.pending_op = None;
+                self.clear_pending_op();
 
                 match vpn_servers {
                     Ok(servers) => {
@@ -407,9 +501,15 @@ impl App {
                 firewall,
                 ip_forwarding,
             } => {
-                // Restore managers to app state (prevents Drop cleanup)
+                // ALWAYS restore managers to prevent Drop cleanup, even if cancelled
                 self.firewall = firewall;
                 self.ip_forwarding = ip_forwarding;
+
+                // If the user cancelled, don't proceed with the startup flow
+                if self.pending_op != Some(PendingOp::StartingSharing) {
+                    self.log_info("Sharing result arrived after cancel (resources restored)");
+                    return;
+                }
 
                 match result {
                     Ok(()) => {
@@ -466,7 +566,7 @@ impl App {
                     }
                     Err(e) => {
                         self.log_error(format!("Failed to start sharing: {}", e));
-                        self.pending_op = None;
+                        self.clear_pending_op();
                         self.state = AppState::Menu;
                         self.pending_vpn_name = None;
                         self.pending_lan_name = None;
@@ -524,10 +624,10 @@ impl App {
                 firewall,
                 ip_forwarding,
             } => {
-                // Restore managers to app state (already cleaned up)
+                // ALWAYS restore managers, even if cancelled
                 self.firewall = firewall;
                 self.ip_forwarding = ip_forwarding;
-                self.pending_op = None;
+                self.clear_pending_op();
 
                 match result {
                     Ok(()) => {
@@ -550,7 +650,7 @@ impl App {
                 // Note: if should_quit is set, main loop will exit
             }
             AsyncOpResult::DebugInfoFetched { info } => {
-                self.pending_op = None;
+                self.clear_pending_op();
 
                 match info {
                     Ok(debug_info) => {
@@ -567,7 +667,7 @@ impl App {
 
     /// Clear pending startup state and transition to Active.
     fn finish_startup(&mut self) {
-        self.pending_op = None;
+        self.clear_pending_op();
         self.state = AppState::Active;
         self.pending_vpn_name = None;
         self.pending_lan_name = None;
@@ -636,12 +736,29 @@ impl App {
         }
 
         self.log_info("Detecting network interfaces...");
-        self.pending_op = Some(PendingOp::DetectingInterfaces);
+        self.set_pending_op(PendingOp::DetectingInterfaces);
 
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            let vpn = detect_vpn_interfaces().await;
-            let lan = detect_lan_interfaces().await;
+            let result = tokio::time::timeout(TIMEOUT_INTERFACES, async {
+                let vpn = detect_vpn_interfaces().await;
+                let lan = detect_lan_interfaces().await;
+                (vpn, lan)
+            })
+            .await;
+
+            let (vpn, lan) = match result {
+                Ok(pair) => pair,
+                Err(_) => {
+                    let err = || {
+                        Err(crate::error::TunshareError::CommandFailed {
+                            command: "detect_interfaces".into(),
+                            message: "operation timed out".into(),
+                        })
+                    };
+                    (err(), err())
+                }
+            };
             let _ = tx.send(AsyncOpResult::InterfacesDetected { vpn, lan });
         });
     }
@@ -653,13 +770,27 @@ impl App {
         }
 
         self.log_info(format!("Discovering DNS for {}...", vpn_name));
-        self.pending_op = Some(PendingOp::DiscoveringDns);
+        self.set_pending_op(PendingOp::DiscoveringDns);
 
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            // Fetch both VPN and system DNS in parallel
-            let (vpn_servers, system_servers) =
-                tokio::join!(discover_vpn_dns(&vpn_name), get_default_dns());
+            let result = tokio::time::timeout(TIMEOUT_DNS, async {
+                tokio::join!(discover_vpn_dns(&vpn_name), get_default_dns())
+            })
+            .await;
+
+            let (vpn_servers, system_servers) = match result {
+                Ok(pair) => pair,
+                Err(_) => {
+                    let err = || {
+                        Err(crate::error::TunshareError::CommandFailed {
+                            command: "discover_dns".into(),
+                            message: "operation timed out".into(),
+                        })
+                    };
+                    (err(), err())
+                }
+            };
             let _ = tx.send(AsyncOpResult::DnsDiscovered {
                 vpn_servers,
                 system_servers,
@@ -682,13 +813,11 @@ impl App {
             "Starting VPN sharing: {} -> {}",
             vpn_name, lan_name
         ));
-        self.pending_op = Some(PendingOp::StartingSharing);
+        self.set_pending_op(PendingOp::StartingSharing);
         self.pending_vpn_name = Some(vpn_name.clone());
         self.pending_lan_name = Some(lan_name.clone());
         self.pending_lan_ip = lan_ip;
 
-        // We need to move firewall and ip_forwarding into the async task
-        // But they're not Send, so we'll handle the actual operations differently
         let tx = self.op_tx.clone();
 
         // Take ownership of managers for the async operation
@@ -696,7 +825,7 @@ impl App {
         let mut ip_forwarding = std::mem::take(&mut self.ip_forwarding);
 
         tokio::spawn(async move {
-            let result = async {
+            let result = tokio::time::timeout(TIMEOUT_START_SHARING, async {
                 // Step 1: Enable IP forwarding
                 ip_forwarding.enable().await?;
 
@@ -708,10 +837,17 @@ impl App {
                 }
 
                 Ok(())
-            }
+            })
             .await;
 
-            // Send managers back to avoid Drop cleanup
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(crate::error::TunshareError::FirewallError(
+                    "starting sharing timed out".into(),
+                )),
+            };
+
+            // ALWAYS send managers back to avoid Drop cleanup
             let _ = tx.send(AsyncOpResult::SharingStarted {
                 result,
                 firewall,
@@ -723,7 +859,7 @@ impl App {
     /// Start DHCP server (async).
     fn start_dhcp_async(&mut self, lan_name: String, lan_ip: Ipv4Addr) {
         self.log_info("Starting DHCP server...");
-        self.pending_op = Some(PendingOp::StartingDhcp);
+        self.set_pending_op(PendingOp::StartingDhcp);
 
         // Calculate and store the DHCP range
         self.dhcp_range = Some(DhcpServer::calculate_dhcp_range(lan_ip));
@@ -732,14 +868,19 @@ impl App {
         let dns_servers = self.effective_dns();
 
         tokio::spawn(async move {
-            let mut dhcp = DhcpServer::new(&lan_name, lan_ip, dns_servers);
-            let result = dhcp.start().await;
+            let result = tokio::time::timeout(TIMEOUT_START_DHCP, async {
+                let mut dhcp = DhcpServer::new(&lan_name, lan_ip, dns_servers);
+                dhcp.start().await
+            })
+            .await;
 
-            // Detach so Drop won't stop the daemon — it will be stopped
-            // explicitly via DhcpServer::stop() when sharing is stopped.
-            if result.is_ok() {
-                dhcp.detach();
-            }
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(crate::error::TunshareError::CommandFailed {
+                    command: "start_dhcp".into(),
+                    message: "operation timed out".into(),
+                }),
+            };
 
             let _ = tx.send(AsyncOpResult::DhcpStarted { result });
         });
@@ -758,7 +899,7 @@ impl App {
         }
 
         self.log_info("Stopping VPN sharing...");
-        self.pending_op = Some(PendingOp::StoppingSharing);
+        self.set_pending_op(PendingOp::StoppingSharing);
 
         let tx = self.op_tx.clone();
         let dhcp_active = self.dhcp_active;
@@ -775,41 +916,47 @@ impl App {
         let mut ip_forwarding = std::mem::take(&mut self.ip_forwarding);
 
         tokio::spawn(async move {
-            let mut errors = Vec::new();
+            let result = tokio::time::timeout(TIMEOUT_STOP_SHARING, async {
+                let mut errors = Vec::new();
 
-            // Step 1: Flush NAT-PMP anchor rules (server task is already shutting down)
-            if natpmp_active {
-                if let Err(e) = NatPmpServer::stop().await {
-                    errors.push(format!("NAT-PMP cleanup: {}", e));
+                if natpmp_active {
+                    if let Err(e) = NatPmpServer::stop().await {
+                        errors.push(format!("NAT-PMP cleanup: {}", e));
+                    }
                 }
-            }
 
-            // Step 2: Stop DHCP server if it was running
-            if dhcp_active {
-                if let Err(e) = DhcpServer::stop().await {
-                    errors.push(format!("DHCP cleanup: {}", e));
+                if dhcp_active {
+                    if let Err(e) = DhcpServer::stop().await {
+                        errors.push(format!("DHCP cleanup: {}", e));
+                    }
                 }
-            }
 
-            // Step 3: Cleanup firewall
-            if let Err(e) = firewall.cleanup().await {
-                errors.push(format!("Firewall cleanup: {}", e));
-            }
+                if let Err(e) = firewall.cleanup().await {
+                    errors.push(format!("Firewall cleanup: {}", e));
+                }
 
-            // Step 4: Restore IP forwarding
-            if let Err(e) = ip_forwarding.restore().await {
-                errors.push(format!("IP forwarding: {}", e));
-            }
+                if let Err(e) = ip_forwarding.restore().await {
+                    errors.push(format!("IP forwarding: {}", e));
+                }
 
-            let result = if errors.is_empty() {
-                Ok(())
-            } else {
-                Err(crate::error::TunshareError::FirewallError(
-                    errors.join("; "),
-                ))
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(crate::error::TunshareError::FirewallError(
+                        errors.join("; "),
+                    ))
+                }
+            })
+            .await;
+
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(crate::error::TunshareError::FirewallError(
+                    "stopping sharing timed out".into(),
+                )),
             };
 
-            // Send managers back (already cleaned up, won't trigger Drop cleanup)
+            // ALWAYS send managers back to avoid Drop cleanup
             let _ = tx.send(AsyncOpResult::SharingStopped {
                 result,
                 firewall,
@@ -824,7 +971,7 @@ impl App {
             return; // Already busy
         }
 
-        self.pending_op = Some(PendingOp::FetchingDebugInfo);
+        self.set_pending_op(PendingOp::FetchingDebugInfo);
 
         let tx = self.op_tx.clone();
         let ip_forwarding_modified = self.ip_forwarding.is_modified();
@@ -833,8 +980,7 @@ impl App {
         let natpmp_running = self.natpmp_active;
 
         tokio::spawn(async move {
-            let info = async {
-                // Fetch all debug info in parallel
+            let info = tokio::time::timeout(TIMEOUT_DEBUG_INFO, async {
                 let ip_fwd = IpForwarding::new();
                 let (pf_rules, pf_states, pf_enabled, ip_fwd_state) = tokio::join!(
                     Firewall::get_current_rules(),
@@ -845,7 +991,7 @@ impl App {
 
                 let pf_rules = pf_rules.unwrap_or_else(|e| format!("Error: {}", e));
                 let pf_states = pf_states.unwrap_or_else(|e| format!("Error: {}", e));
-                let pf_state_count = pf_states.lines().count().saturating_sub(1); // First line is often header
+                let pf_state_count = pf_states.lines().count().saturating_sub(1);
                 let pf_enabled = pf_enabled.unwrap_or(false);
                 let ip_forwarding_enabled = ip_fwd_state.unwrap_or(false);
 
@@ -860,8 +1006,16 @@ impl App {
                     dhcp_range,
                     natpmp_running,
                 })
-            }
+            })
             .await;
+
+            let info = match info {
+                Ok(inner) => inner,
+                Err(_) => Err(crate::error::TunshareError::CommandFailed {
+                    command: "fetch_debug_info".into(),
+                    message: "operation timed out".into(),
+                }),
+            };
 
             let _ = tx.send(AsyncOpResult::DebugInfoFetched { info });
         });
@@ -906,16 +1060,29 @@ impl App {
     /// Start NAT-PMP server (async).
     fn start_natpmp_async(&mut self, vpn_name: String, lan_name: String, lan_ip: Ipv4Addr) {
         self.log_info("Starting NAT-PMP server...");
-        self.pending_op = Some(PendingOp::StartingNatPmp);
+        self.set_pending_op(PendingOp::StartingNatPmp);
 
         let tx = self.op_tx.clone();
 
         tokio::spawn(async move {
             let lan_network = NatPmpServer::network_from_ip(lan_ip);
             let server = NatPmpServer::new(&vpn_name, &lan_name, &lan_network);
-            let result = server.start().await;
 
-            let server = if result.is_ok() { Some(server) } else { None };
+            let result = tokio::time::timeout(TIMEOUT_START_NATPMP, server.start()).await;
+
+            let (result, server) = match result {
+                Ok(inner) => {
+                    let server = if inner.is_ok() { Some(server) } else { None };
+                    (inner, server)
+                }
+                Err(_) => (
+                    Err(crate::error::TunshareError::CommandFailed {
+                        command: "start_natpmp".into(),
+                        message: "operation timed out".into(),
+                    }),
+                    None,
+                ),
+            };
 
             let _ = tx.send(AsyncOpResult::NatPmpStarted { result, server });
         });
@@ -923,10 +1090,16 @@ impl App {
 
     /// Handle keyboard input.
     pub fn handle_key(&mut self, key: crossterm::event::KeyCode) {
-        // Ignore input while an operation is pending (except quit)
+        // While an operation is pending, only allow quit and cancel
         if self.pending_op.is_some() {
-            if key == crossterm::event::KeyCode::Char('q') {
-                self.should_quit = true;
+            match key {
+                crossterm::event::KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                crossterm::event::KeyCode::Esc => {
+                    self.cancel_pending_op();
+                }
+                _ => {}
             }
             return;
         }
@@ -1234,7 +1407,7 @@ impl App {
     /// Get the help text for current state.
     pub fn help_text(&self) -> &'static str {
         if self.pending_op.is_some() {
-            return "q: Force quit";
+            return "Esc: Cancel  q: Force quit";
         }
 
         match self.state {

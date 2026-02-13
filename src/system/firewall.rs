@@ -150,60 +150,18 @@ anchor "natpmp"
         Ok(())
     }
 
-    /// Stop sharing and restore default pf rules.
-    /// We don't flush all states because that would kill the VPN connection.
+    /// Stop sharing and restore default pf rules (async wrapper).
+    /// Delegates to `cleanup_sync` via `spawn_blocking`.
     pub async fn cleanup(&mut self) -> Result<()> {
-        let mut errors = Vec::new();
-
-        // 1. Restore default pf rules (don't flush states - that kills VPN)
-        if let Err(e) = Self::restore_default_rules().await {
-            errors.push(format!("Failed to restore default rules: {}", e));
-        }
-
-        // 2. Remove our config file
-        if Path::new(&self.config_path).exists() {
-            if let Err(e) = fs::remove_file(&self.config_path) {
-                errors.push(format!("Failed to remove config file: {}", e));
-            }
-        }
-
-        self.rules_loaded = false;
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(TunshareError::FirewallError(errors.join("; ")))
-        }
-    }
-
-    /// Restore default macOS pf rules.
-    async fn restore_default_rules() -> Result<()> {
-        if !Path::new(DEFAULT_PF_CONF).exists() {
-            // No default config to restore - just disable pf
-            let _ = Command::new("pfctl").args(["-d"]).output().await;
-            return Ok(());
-        }
-
-        let output = Command::new("pfctl")
-            .args(["-f", DEFAULT_PF_CONF])
-            .output()
+        let config_path = self.config_path.clone();
+        tokio::task::spawn_blocking(move || cleanup_sync_impl(&config_path))
             .await
             .map_err(|e| TunshareError::CommandFailed {
-                command: format!("pfctl -f {}", DEFAULT_PF_CONF),
+                command: "cleanup (spawn_blocking)".into(),
                 message: e.to_string(),
-            })?;
+            })??;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Ignore certain expected messages
-            if !stderr.contains("rules loaded") && stderr.contains("error") {
-                return Err(TunshareError::FirewallError(format!(
-                    "Failed to restore default rules: {}",
-                    stderr
-                )));
-            }
-        }
-
+        self.rules_loaded = false;
         Ok(())
     }
 
@@ -281,25 +239,9 @@ anchor "natpmp"
         self.rules_loaded
     }
 
-    /// Synchronous cleanup for use in Drop - uses std::process::Command.
-    /// This is a fallback for when async cleanup isn't possible.
+    /// Synchronous cleanup for use in Drop and async wrapper.
     pub fn cleanup_sync(&mut self) {
-        use std::process::Command as SyncCommand;
-
-        // 1. Restore default pf rules (don't flush states - that kills VPN)
-        if Path::new(DEFAULT_PF_CONF).exists() {
-            let _ = SyncCommand::new("pfctl")
-                .args(["-f", DEFAULT_PF_CONF])
-                .output();
-        } else {
-            let _ = SyncCommand::new("pfctl").args(["-d"]).output();
-        }
-
-        // 2. Remove our config file
-        if Path::new(&self.config_path).exists() {
-            let _ = fs::remove_file(&self.config_path);
-        }
-
+        let _ = cleanup_sync_impl(&self.config_path);
         self.rules_loaded = false;
     }
 }
@@ -316,5 +258,43 @@ impl Drop for Firewall {
         if self.rules_loaded {
             self.cleanup_sync();
         }
+    }
+}
+
+/// Standalone sync cleanup logic. Single source of truth for both
+/// `cleanup_sync()` and `cleanup()` (via `spawn_blocking`).
+fn cleanup_sync_impl(config_path: &str) -> Result<()> {
+    use std::process::Command as SyncCommand;
+
+    let mut errors = Vec::new();
+
+    // 1. Restore default pf rules (don't flush states - that kills VPN)
+    if Path::new(DEFAULT_PF_CONF).exists() {
+        let output = SyncCommand::new("pfctl")
+            .args(["-f", DEFAULT_PF_CONF])
+            .output();
+        if let Ok(output) = output {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("rules loaded") && stderr.contains("error") {
+                    errors.push(format!("Failed to restore default rules: {}", stderr));
+                }
+            }
+        }
+    } else {
+        let _ = SyncCommand::new("pfctl").args(["-d"]).output();
+    }
+
+    // 2. Remove our config file
+    if Path::new(config_path).exists() {
+        if let Err(e) = fs::remove_file(config_path) {
+            errors.push(format!("Failed to remove config file: {}", e));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(TunshareError::FirewallError(errors.join("; ")))
     }
 }
