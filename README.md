@@ -4,7 +4,9 @@ A macOS TUI application that shares your VPN connection over LAN. Point other de
 
 ## Why
 
-Some devices -- smart TVs, game consoles, IoT gadgets -- either can't run a VPN client or make it painfully annoying. tunshare turns your Mac into a NAT gateway: it detects your VPN and LAN interfaces, configures macOS's `pf` firewall, and forwards traffic so any device on your local network can route through your VPN.
+macOS has built-in Internet Sharing, but it doesn't show most VPN interfaces. If your VPN creates a `utun` tunnel, it simply won't appear in the sharing dropdown -- there's no workaround in System Settings.
+
+tunshare exists because of that gap. It detects your VPN tunnel directly, sets up NAT through macOS's `pf` firewall, and shares the connection over your LAN. Any device on your network -- smart TVs, game consoles, IoT gadgets, anything -- gets VPN-tunneled internet without needing its own VPN client.
 
 ## Features
 
@@ -13,6 +15,8 @@ Some devices -- smart TVs, game consoles, IoT gadgets -- either can't run a VPN 
 - **DHCP server** -- optionally runs `dnsmasq` so connected devices get IP addresses without manual config
 - **NAT-PMP** -- native RFC 6886 server for automatic port mapping (replaces external miniupnpd)
 - **DNS configuration** -- choose from presets (Cloudflare, Google, Quad9) or enter a custom DNS server
+- **Health monitoring** -- detects VPN disconnects and IP forwarding changes within seconds, shown in the header
+- **Persistent preferences** -- DHCP, NAT-PMP, and DNS settings are saved across sessions
 - **Debug panel** -- live view of active firewall rules, interface state, and NAT-PMP mappings
 - **Clean shutdown** -- all firewall rules, IP forwarding, DHCP, and NAT-PMP are torn down on exit (even on panic)
 
