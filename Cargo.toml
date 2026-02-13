@@ -1,11 +1,11 @@
 [package]
-name = "vpn-share"
+name = "tunshare"
 version = "0.1.0"
 edition = "2021"
 description = "VPN sharing TUI for macOS - routes internet traffic through VPN and shares via LAN"
 license = "MIT"
-repository = "https://github.com/kumamaki/vpn-share"
-homepage = "https://github.com/kumamaki/vpn-share"
+repository = "https://github.com/kumamaki/tunshare"
+homepage = "https://github.com/kumamaki/tunshare"
 authors = ["kumamaki"]
 readme = "README.md"
 keywords = ["vpn", "nat", "macos", "tui", "firewall"]

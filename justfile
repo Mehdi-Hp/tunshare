@@ -22,11 +22,11 @@ dev:
 
 # Run release version (requires sudo)
 run:
-    sudo ./target/release/vpn-share
+    sudo ./target/release/tunshare
 
 # Build and run release version
 run-release: build-release
-    sudo ./target/release/vpn-share
+    sudo ./target/release/tunshare
 
 # Run clippy linter
 lint:
