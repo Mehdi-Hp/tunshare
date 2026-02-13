@@ -4,7 +4,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 #[allow(dead_code)]
-pub enum VpnShareError {
+pub enum TunshareError {
     #[error("Command failed: {command} - {message}")]
     CommandFailed { command: String, message: String },
 
@@ -27,4 +27,4 @@ pub enum VpnShareError {
     Io(#[from] std::io::Error),
 }
 
-pub type Result<T> = std::result::Result<T, VpnShareError>;
+pub type Result<T> = std::result::Result<T, TunshareError>;

@@ -8,6 +8,8 @@ use ratatui::{
     Frame,
 };
 
+use std::collections::VecDeque;
+
 use crate::app::LogEntry;
 use crate::ui::theme::{colors, styles, symbols};
 use crate::ui::widgets::Card;
@@ -55,7 +57,7 @@ pub use LogLevel as LogEntryLevel;
 pub fn render_status_panel(
     frame: &mut Frame,
     area: Rect,
-    logs: &[LogEntry],
+    logs: &VecDeque<LogEntry>,
     max_lines: usize,
     expanded: bool,
 ) {

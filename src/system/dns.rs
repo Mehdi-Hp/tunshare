@@ -1,6 +1,6 @@
 //! VPN DNS server discovery via scutil --dns.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
 use tokio::process::Command;
 
 /// Discover DNS servers associated with a VPN interface.
@@ -12,7 +12,7 @@ pub async fn discover_vpn_dns(vpn_interface: &str) -> Result<Vec<String>> {
         .arg("--dns")
         .output()
         .await
-        .map_err(|e| VpnShareError::CommandFailed {
+        .map_err(|e| TunshareError::CommandFailed {
             command: "scutil --dns".into(),
             message: e.to_string(),
         })?;
@@ -83,7 +83,7 @@ pub async fn get_default_dns() -> Result<Vec<String>> {
         .arg("--dns")
         .output()
         .await
-        .map_err(|e| VpnShareError::CommandFailed {
+        .map_err(|e| TunshareError::CommandFailed {
             command: "scutil --dns".into(),
             message: e.to_string(),
         })?;

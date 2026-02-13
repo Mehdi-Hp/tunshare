@@ -1,13 +1,14 @@
 //! Network interface detection for VPN and LAN interfaces.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
+use std::net::Ipv4Addr;
 use tokio::process::Command;
 
 /// Information about a network interface.
 #[derive(Debug, Clone)]
 pub struct InterfaceInfo {
     pub name: String,
-    pub ipv4_address: Option<String>,
+    pub ipv4_address: Option<Ipv4Addr>,
     pub description: Option<String>,
     pub is_up: bool,
 }
@@ -18,7 +19,7 @@ pub async fn detect_vpn_interfaces() -> Result<Vec<InterfaceInfo>> {
         .arg("-a")
         .output()
         .await
-        .map_err(|e| VpnShareError::CommandFailed {
+        .map_err(|e| TunshareError::CommandFailed {
             command: "ifconfig -a".into(),
             message: e.to_string(),
         })?;
@@ -44,7 +45,7 @@ pub async fn detect_lan_interfaces() -> Result<Vec<InterfaceInfo>> {
         .args(["-listallhardwareports"])
         .output()
         .await
-        .map_err(|e| VpnShareError::CommandFailed {
+        .map_err(|e| TunshareError::CommandFailed {
             command: "networksetup -listallhardwareports".into(),
             message: e.to_string(),
         })?;
@@ -57,7 +58,7 @@ pub async fn detect_lan_interfaces() -> Result<Vec<InterfaceInfo>> {
         .arg("-a")
         .output()
         .await
-        .map_err(|e| VpnShareError::CommandFailed {
+        .map_err(|e| TunshareError::CommandFailed {
             command: "ifconfig -a".into(),
             message: e.to_string(),
         })?;
@@ -114,7 +115,7 @@ fn parse_interfaces(output: &str) -> Vec<InterfaceInfo> {
                 // or:     inet 192.168.2.1 netmask 0xffffff00 broadcast 192.168.2.255
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 2 {
-                    iface.ipv4_address = Some(parts[1].to_string());
+                    iface.ipv4_address = parts[1].parse::<Ipv4Addr>().ok();
                 }
             }
         }
@@ -175,10 +176,10 @@ utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
 
         let en0 = interfaces.iter().find(|i| i.name == "en0").unwrap();
         assert!(en0.is_up);
-        assert_eq!(en0.ipv4_address, Some("192.168.2.1".to_string()));
+        assert_eq!(en0.ipv4_address, Some(Ipv4Addr::new(192, 168, 2, 1)));
 
         let utun3 = interfaces.iter().find(|i| i.name == "utun3").unwrap();
         assert!(utun3.is_up);
-        assert_eq!(utun3.ipv4_address, Some("10.8.0.6".to_string()));
+        assert_eq!(utun3.ipv4_address, Some(Ipv4Addr::new(10, 8, 0, 6)));
     }
 }

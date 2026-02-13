@@ -488,8 +488,14 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let vpn_ip = vpn.ipv4_address.as_deref().unwrap_or("?.?.?.?");
-    let lan_ip = lan.ipv4_address.as_deref().unwrap_or("?.?.?.?");
+    let vpn_ip = vpn
+        .ipv4_address
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "?.?.?.?".into());
+    let lan_ip = lan
+        .ipv4_address
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "?.?.?.?".into());
 
     // Draw a single card over the full area
     let card = Card::new(Span::styled(" Connection ", styles::card_title())).focused(true);
@@ -519,9 +525,9 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
         inner,
         diagram_start_y,
         &vpn.name,
-        vpn_ip,
+        &vpn_ip,
         &lan.name,
-        lan_ip,
+        &lan_ip,
     );
 
     // Separator after diagram (labels row + 3 box rows + 1 blank = 5 rows from diagram_start_y)
@@ -532,7 +538,7 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
 
     // Config rows start after separator + blank
     let config_start_y = sep_y + 2;
-    render_config_rows(frame, inner, config_start_y, lan_ip, app);
+    render_config_rows(frame, inner, config_start_y, &lan_ip, app);
 }
 
 /// Render the diagram (labels, boxes, arrow) into the given inner area at the specified y offset.

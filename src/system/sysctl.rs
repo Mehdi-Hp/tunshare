@@ -1,6 +1,6 @@
 //! IP forwarding control via sysctl.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
 use tokio::process::Command;
 
 /// Manages IP forwarding state.
@@ -23,7 +23,7 @@ impl IpForwarding {
             .arg("net.inet.ip.forwarding")
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "sysctl -n net.inet.ip.forwarding".into(),
                 message: e.to_string(),
             })?;
@@ -34,7 +34,7 @@ impl IpForwarding {
         match value {
             "1" => Ok(true),
             "0" => Ok(false),
-            _ => Err(VpnShareError::ParseError(format!(
+            _ => Err(TunshareError::ParseError(format!(
                 "Unexpected sysctl value: {}",
                 value
             ))),
@@ -72,7 +72,7 @@ impl IpForwarding {
             .arg(format!("net.inet.ip.forwarding={}", value))
             .output()
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: format!("sysctl -w net.inet.ip.forwarding={}", value),
                 message: e.to_string(),
             })?;
@@ -80,9 +80,9 @@ impl IpForwarding {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("Operation not permitted") || stderr.contains("Permission denied") {
-                return Err(VpnShareError::PermissionDenied);
+                return Err(TunshareError::PermissionDenied);
             }
-            return Err(VpnShareError::CommandFailed {
+            return Err(TunshareError::CommandFailed {
                 command: format!("sysctl -w net.inet.ip.forwarding={}", value),
                 message: stderr.to_string(),
             });

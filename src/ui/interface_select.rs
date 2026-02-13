@@ -148,7 +148,10 @@ fn render_selected_vpn_summary(
         area.height.saturating_sub(2),
     );
 
-    let ip = vpn.ipv4_address.as_deref().unwrap_or("?.?.?.?");
+    let ip = vpn
+        .ipv4_address
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "?.?.?.?".into());
     let dns_display = if dns_servers.is_empty() {
         "none".to_string()
     } else {
@@ -247,14 +250,14 @@ fn render_interface_list(
         // Tree-style details (only for selected or if there's space)
         if is_selected && y_offset + 2 <= inner.height {
             // IP line
-            if let Some(ref ip) = iface.ipv4_address {
+            if let Some(ip) = iface.ipv4_address {
                 let ip_line = Line::from(vec![
                     Span::styled(
                         format!("  {} ", symbols::TREE_BRANCH),
                         styles::tree_branch(),
                     ),
                     Span::styled("IP: ", Style::default().fg(colors::TEXT_SECONDARY)),
-                    Span::styled(ip, Style::default().fg(colors::TEXT_PRIMARY)),
+                    Span::styled(ip.to_string(), Style::default().fg(colors::TEXT_PRIMARY)),
                 ]);
                 let ip_area = Rect::new(inner.x, inner.y + y_offset, inner.width, 1);
                 frame.render_widget(Paragraph::new(ip_line), ip_area);

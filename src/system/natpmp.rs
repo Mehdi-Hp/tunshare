@@ -3,7 +3,7 @@
 //! Replaces the external miniupnpd dependency with a pure Rust implementation
 //! that runs as a tokio task inside the existing async runtime.
 
-use crate::error::{Result, VpnShareError};
+use crate::error::{Result, TunshareError};
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -87,7 +87,7 @@ impl NatPmpServer {
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, NATPMP_PORT);
         let socket = UdpSocket::bind(addr)
             .await
-            .map_err(|e| VpnShareError::CommandFailed {
+            .map_err(|e| TunshareError::CommandFailed {
                 command: "bind NAT-PMP UDP socket".into(),
                 message: format!("Failed to bind port {}: {}", NATPMP_PORT, e),
             })?;
@@ -178,11 +178,10 @@ impl NatPmpServer {
             .output();
     }
 
-    /// Derive a /24 network CIDR from a gateway IP (e.g., "192.168.2.1" -> "192.168.2.0/24").
-    pub fn network_from_ip(ip: &str) -> Option<String> {
-        let addr: Ipv4Addr = ip.parse().ok()?;
-        let octets = addr.octets();
-        Some(format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]))
+    /// Derive a /24 network CIDR from a gateway IP (e.g., 192.168.2.1 -> "192.168.2.0/24").
+    pub fn network_from_ip(ip: Ipv4Addr) -> String {
+        let o = ip.octets();
+        format!("{}.{}.{}.0/24", o[0], o[1], o[2])
     }
 }
 
@@ -505,14 +504,13 @@ mod tests {
     #[test]
     fn test_network_from_ip() {
         assert_eq!(
-            NatPmpServer::network_from_ip("192.168.2.1"),
-            Some("192.168.2.0/24".to_string())
+            NatPmpServer::network_from_ip(Ipv4Addr::new(192, 168, 2, 1)),
+            "192.168.2.0/24"
         );
         assert_eq!(
-            NatPmpServer::network_from_ip("10.0.0.1"),
-            Some("10.0.0.0/24".to_string())
+            NatPmpServer::network_from_ip(Ipv4Addr::new(10, 0, 0, 1)),
+            "10.0.0.0/24"
         );
-        assert_eq!(NatPmpServer::network_from_ip("invalid"), None);
     }
 
     #[test]
