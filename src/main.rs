@@ -4,7 +4,9 @@
 //! Uses macOS's pf (packet filter) firewall for NAT.
 
 mod app;
+mod config;
 mod error;
+mod health;
 mod session;
 mod system;
 mod ui;
