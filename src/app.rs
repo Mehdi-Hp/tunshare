@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
+use crate::config::{Config, DNS_HISTORY_MAX};
 use crate::error::Result;
 use crate::health::{self, HealthStatus, VpnDropStrategy};
 use crate::session::SharingSession;
@@ -174,24 +174,40 @@ pub struct DnsConfig {
     pub system_servers: Vec<String>,
     /// User-specified custom DNS server (overrides auto-detected).
     pub custom: Option<String>,
+    /// Recently-used custom DNS servers, most-recent first, capped at
+    /// [`DNS_HISTORY_MAX`]. Persisted in the config file.
+    pub history: Vec<String>,
     /// Text input buffer for DNS editing.
     pub input_buffer: String,
     /// DNS edit sub-mode (preset list vs custom input).
     pub edit_mode: DnsEditMode,
-    /// Selected index in the DNS preset list (0=Auto-detect, 1..N=presets, N+1=Custom...).
+    /// Selected index in the picker list. Layout (no divider rows):
+    /// `[Auto-detect, ...presets, ...history, Custom...]`
     pub preset_selected: usize,
 }
 
 impl DnsConfig {
-    fn new(custom: Option<String>) -> Self {
+    fn new(custom: Option<String>, history: Vec<String>) -> Self {
         Self {
             vpn_servers: Vec::new(),
             system_servers: Vec::new(),
             custom,
+            history,
             input_buffer: String::new(),
             edit_mode: DnsEditMode::SelectingPreset,
             preset_selected: 0,
         }
+    }
+
+    /// Move `value` to the front of history, dedup, cap at [`DNS_HISTORY_MAX`].
+    /// No-op if `value` matches a built-in preset (those are always available).
+    pub fn promote_to_history(&mut self, value: &str) {
+        if DNS_PRESETS.iter().any(|p| p.ip == value) {
+            return;
+        }
+        self.history.retain(|h| h != value);
+        self.history.insert(0, value.to_string());
+        self.history.truncate(DNS_HISTORY_MAX);
     }
 
     /// Get the effective DNS servers (custom > vpn > system).
@@ -312,7 +328,7 @@ impl App {
         let mut app = Self {
             vpn_interfaces: Vec::new(),
             lan_interfaces: Vec::new(),
-            dns: DnsConfig::new(config.custom_dns),
+            dns: DnsConfig::new(config.custom_dns, config.dns_history),
             selected_vpn: None,
             selected_lan: None,
             session: None,
@@ -1448,18 +1464,20 @@ impl App {
     fn start_dns_edit(&mut self) {
         self.dns.input_buffer = self.dns.custom.clone().unwrap_or_default();
         self.dns.edit_mode = DnsEditMode::SelectingPreset;
-        // Pre-select current DNS in the preset list
-        self.dns.preset_selected = if self.dns.custom.is_none() {
-            0 // Auto-detect
-        } else if let Some(ref dns) = self.dns.custom {
-            // Check if the custom DNS matches a preset
-            DNS_PRESETS
-                .iter()
-                .position(|p| p.ip == dns.as_str())
-                .map(|i| i + 1) // +1 because 0 is Auto-detect
-                .unwrap_or(DNS_PRESETS.len() + 1) // Custom...
-        } else {
-            0
+        // Pre-select the row matching the currently-active custom DNS,
+        // preferring a preset match, then a history match, falling back to
+        // "Custom..." (or Auto-detect when nothing is set).
+        self.dns.preset_selected = match self.dns.custom.as_deref() {
+            None => 0,
+            Some(active) => {
+                if let Some(i) = DNS_PRESETS.iter().position(|p| p.ip == active) {
+                    1 + i
+                } else if let Some(i) = self.dns.history.iter().position(|h| h == active) {
+                    self.dns_history_start() + i
+                } else {
+                    self.dns_custom_input_idx()
+                }
+            }
         };
         self.state = AppState::EditingDns;
     }
@@ -1472,9 +1490,27 @@ impl App {
         }
     }
 
-    /// Total number of items in the preset list (Auto-detect + presets + Custom...).
+    /// Total number of selectable rows in the picker.
+    /// Layout: `[Auto-detect, ...presets, ...history, Custom...]`.
     fn dns_preset_count(&self) -> usize {
-        1 + DNS_PRESETS.len() + 1
+        1 + DNS_PRESETS.len() + self.dns.history.len() + 1
+    }
+
+    /// Index of the first history row (one past the last preset row).
+    fn dns_history_start(&self) -> usize {
+        1 + DNS_PRESETS.len()
+    }
+
+    /// Index of the "Custom..." row.
+    pub fn dns_custom_input_idx(&self) -> usize {
+        self.dns_history_start() + self.dns.history.len()
+    }
+
+    /// If the given picker row points into history, return its history index.
+    pub fn dns_history_idx(&self, row: usize) -> Option<usize> {
+        let start = self.dns_history_start();
+        let end = start + self.dns.history.len();
+        (row >= start && row < end).then(|| row - start)
     }
 
     /// Handle key input in preset selection mode.
@@ -1493,6 +1529,18 @@ impl App {
                     self.dns.preset_selected += 1;
                 }
             }
+            KeyCode::Char('x') => {
+                // Delete the highlighted history entry. No-op on other rows.
+                if let Some(h_idx) = self.dns_history_idx(self.dns.preset_selected) {
+                    let removed = self.dns.history.remove(h_idx);
+                    self.log_info(format!("Removed {} from DNS history", removed));
+                    // Keep selection on a valid row.
+                    if self.dns.preset_selected >= self.dns_preset_count() {
+                        self.dns.preset_selected = self.dns_preset_count().saturating_sub(1);
+                    }
+                    self.save_preferences();
+                }
+            }
             KeyCode::Enter => {
                 let idx = self.dns.preset_selected;
                 if idx == 0 {
@@ -1508,8 +1556,16 @@ impl App {
                     self.log_success(format!("DNS set to {} ({})", preset.ip, preset.name));
                     self.save_preferences();
                     self.state = AppState::Menu;
+                } else if let Some(h_idx) = self.dns_history_idx(idx) {
+                    // A history entry — set active and promote to top.
+                    let value = self.dns.history[h_idx].clone();
+                    self.dns.promote_to_history(&value);
+                    self.dns.custom = Some(value.clone());
+                    self.log_success(format!("DNS set to {} (recent)", value));
+                    self.save_preferences();
+                    self.state = AppState::Menu;
                 } else {
-                    // Custom...
+                    // Custom... row.
                     self.dns.edit_mode = DnsEditMode::CustomInput;
                     self.dns.input_buffer = self.dns.custom.clone().unwrap_or_default();
                 }
@@ -1542,6 +1598,7 @@ impl App {
                     self.dns.custom = None;
                     self.log_info("DNS reset to auto-detect");
                 } else if input.parse::<IpAddr>().is_ok() {
+                    self.dns.promote_to_history(&input);
                     self.dns.custom = Some(input.clone());
                     self.log_success(format!("Custom DNS set to {}", input));
                 } else {
@@ -1590,6 +1647,9 @@ impl App {
             AppState::Active if self.show_debug => "d: Hide debug  s: Stop  l: Logs  q: Quit",
             AppState::Active => "s: Stop  d: Debug  l: Logs  q: Quit",
             AppState::EditingDns => match self.dns.edit_mode {
+                DnsEditMode::SelectingPreset if !self.dns.history.is_empty() => {
+                    "↑/↓: Navigate  Enter: Select  x: Remove recent  Esc: Cancel"
+                }
                 DnsEditMode::SelectingPreset => "↑/↓: Navigate  Enter: Select  Esc: Cancel",
                 DnsEditMode::CustomInput => "Enter: Save  Esc: Back  (empty = auto-detect)",
             },
@@ -1604,6 +1664,7 @@ impl App {
             dhcp_enabled: self.dhcp_enabled,
             natpmp_enabled: self.natpmp_enabled,
             custom_dns: self.dns.custom.clone(),
+            dns_history: self.dns.history.clone(),
             vpn_drop_strategy: self.vpn_drop_strategy,
         }
         .save();
@@ -1743,6 +1804,49 @@ mod tests {
         // No session attached — stop_sharing_async should log and bail to Menu.
         app.handle_key(KeyCode::Char('s'));
         assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn dns_history_promotion_dedups_and_caps() {
+        let mut cfg = DnsConfig::new(None, Vec::new());
+        // Build a 12-entry history; should cap to DNS_HISTORY_MAX (10).
+        for i in 0..12 {
+            cfg.promote_to_history(&format!("10.0.0.{i}"));
+        }
+        assert_eq!(cfg.history.len(), DNS_HISTORY_MAX);
+        // Most recent first.
+        assert_eq!(cfg.history[0], "10.0.0.11");
+        assert_eq!(cfg.history[DNS_HISTORY_MAX - 1], "10.0.0.2");
+
+        // Promoting an existing value moves it to the front without duplicating.
+        cfg.promote_to_history("10.0.0.5");
+        assert_eq!(cfg.history[0], "10.0.0.5");
+        assert_eq!(cfg.history.len(), DNS_HISTORY_MAX);
+        assert_eq!(cfg.history.iter().filter(|h| *h == "10.0.0.5").count(), 1);
+    }
+
+    #[test]
+    fn dns_history_skips_built_in_presets() {
+        let mut cfg = DnsConfig::new(None, Vec::new());
+        // 1.1.1.1 is the Cloudflare preset — it shouldn't enter history.
+        cfg.promote_to_history("1.1.1.1");
+        cfg.promote_to_history("10.0.0.5");
+        assert_eq!(cfg.history, vec!["10.0.0.5".to_string()]);
+    }
+
+    #[test]
+    fn dns_picker_history_indexing() {
+        let mut app = App::new();
+        app.dns.history = vec!["10.0.0.5".to_string(), "192.168.1.1".to_string()];
+
+        // Layout: [Auto(0), Cloudflare(1), Google(2), Quad9(3), OpenDNS(4),
+        //          10.0.0.5(5), 192.168.1.1(6), Custom...(7)]
+        let preset_count = 4; // matches DNS_PRESETS const length
+        assert_eq!(app.dns_history_idx(preset_count), None); // last preset
+        assert_eq!(app.dns_history_idx(1 + preset_count), Some(0));
+        assert_eq!(app.dns_history_idx(2 + preset_count), Some(1));
+        assert_eq!(app.dns_custom_input_idx(), 3 + preset_count);
+        assert_eq!(app.dns_history_idx(app.dns_custom_input_idx()), None);
     }
 
     #[test]

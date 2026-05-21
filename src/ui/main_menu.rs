@@ -342,10 +342,129 @@ pub fn render_dns_edit(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Render the DNS preset selection list.
 fn render_dns_preset_list(frame: &mut Frame, area: Rect, app: &App) {
-    // Items: Auto-detect, presets..., Custom...
-    let item_count = 1 + DNS_PRESETS.len() + 1; // auto + presets + custom
+    // Build a flat list of rows. Selectable rows carry their picker index;
+    // a divider row (between presets and history) carries None and isn't
+    // reachable by the cursor.
+    let name_col_width = 18u16;
+    let has_history = !app.dns.history.is_empty();
+
+    let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
+
+    // Build a row builder closure for selectable rows.
+    let build_row = |is_selected: bool, content: Vec<Span<'static>>| -> Line<'static> {
+        let prefix_text = if is_selected {
+            format!("  {}  ", symbols::SELECTED)
+        } else {
+            "     ".to_string()
+        };
+        let style = if is_selected {
+            styles::selected()
+        } else {
+            styles::unselected()
+        };
+        let mut spans = vec![Span::styled(prefix_text, style)];
+        spans.extend(content);
+        Line::from(spans)
+    };
+
+    let sel = app.dns.preset_selected;
+
+    // Auto-detect
+    {
+        let is_selected = sel == 0;
+        let style = if is_selected {
+            styles::selected()
+        } else {
+            styles::unselected()
+        };
+        rows.push((
+            Some(0),
+            build_row(is_selected, vec![Span::styled("Auto-detect", style)]),
+        ));
+    }
+
+    // Presets
+    for (i, preset) in DNS_PRESETS.iter().enumerate() {
+        let idx = 1 + i;
+        let is_selected = sel == idx;
+        let style = if is_selected {
+            styles::selected()
+        } else {
+            styles::unselected()
+        };
+        let ip_style = if is_selected {
+            style
+        } else {
+            Style::default().fg(colors::TEXT_SECONDARY)
+        };
+        let name = format!("{:<width$}", preset.name, width = name_col_width as usize);
+        rows.push((
+            Some(idx),
+            build_row(
+                is_selected,
+                vec![
+                    Span::styled(name, style),
+                    Span::styled(preset.ip.to_string(), ip_style),
+                ],
+            ),
+        ));
+    }
+
+    // History block (only if non-empty)
+    if has_history {
+        rows.push((
+            None,
+            Line::from(Span::styled(
+                "     ── Recent ──",
+                Style::default().fg(colors::TEXT_SECONDARY),
+            )),
+        ));
+        let history_start = 1 + DNS_PRESETS.len();
+        for (i, entry) in app.dns.history.iter().enumerate() {
+            let idx = history_start + i;
+            let is_selected = sel == idx;
+            let style = if is_selected {
+                styles::selected()
+            } else {
+                styles::unselected()
+            };
+            let hint_style = if is_selected {
+                style
+            } else {
+                Style::default().fg(colors::TEXT_SECONDARY)
+            };
+            rows.push((
+                Some(idx),
+                build_row(
+                    is_selected,
+                    vec![
+                        Span::styled(entry.clone(), style),
+                        Span::styled("  [x: remove]", hint_style),
+                    ],
+                ),
+            ));
+        }
+    }
+
+    // Custom...
+    {
+        let idx = app.dns_custom_input_idx();
+        let is_selected = sel == idx;
+        let style = if is_selected {
+            styles::selected()
+        } else {
+            styles::unselected()
+        };
+        rows.push((
+            Some(idx),
+            build_row(is_selected, vec![Span::styled("Custom...", style)]),
+        ));
+    }
+
+    // Card sizing: rows + current line + top/bottom padding
+    let row_count = rows.len() as u16;
     let card_width = 44u16.min(area.width.saturating_sub(4));
-    let card_height = (item_count as u16 + 4).min(area.height.saturating_sub(2)); // items + current line + padding
+    let card_height = (row_count + 4).min(area.height.saturating_sub(2));
     let card_x = area.x + (area.width.saturating_sub(card_width)) / 2;
     let card_y = area.y + (area.height.saturating_sub(card_height)) / 2;
     let card_area = Rect::new(card_x, card_y, card_width, card_height);
@@ -376,58 +495,13 @@ fn render_dns_preset_list(frame: &mut Frame, area: Rect, app: &App) {
     let current_area = Rect::new(inner.x, inner.y, inner.width, 1);
     frame.render_widget(Paragraph::new(current_line), current_area);
 
-    // Render each item
-    let items_y = inner.y + 2; // gap after current line
-    let name_col_width = 18u16;
-
-    for i in 0..item_count {
-        let y = items_y + i as u16;
+    // Render each row
+    let items_y = inner.y + 2;
+    for (offset, (_idx, line)) in rows.into_iter().enumerate() {
+        let y = items_y + offset as u16;
         if y >= inner.y + inner.height {
             break;
         }
-
-        let is_selected = i == app.dns.preset_selected;
-        let prefix = if is_selected {
-            format!("  {}  ", symbols::SELECTED)
-        } else {
-            "     ".to_string()
-        };
-
-        let style = if is_selected {
-            styles::selected()
-        } else {
-            styles::unselected()
-        };
-
-        let line = if i == 0 {
-            // Auto-detect
-            Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled("Auto-detect", style),
-            ])
-        } else if i <= DNS_PRESETS.len() {
-            let preset = &DNS_PRESETS[i - 1];
-            let name = format!("{:<width$}", preset.name, width = name_col_width as usize);
-            Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(name, style),
-                Span::styled(
-                    preset.ip,
-                    if is_selected {
-                        style
-                    } else {
-                        Style::default().fg(colors::TEXT_SECONDARY)
-                    },
-                ),
-            ])
-        } else {
-            // Custom...
-            Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled("Custom...", style),
-            ])
-        };
-
         let item_area = Rect::new(inner.x, y, inner.width, 1);
         frame.render_widget(Paragraph::new(line), item_area);
     }

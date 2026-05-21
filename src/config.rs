@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::health::VpnDropStrategy;
 
+/// Maximum number of remembered custom DNS entries.
+pub const DNS_HISTORY_MAX: usize = 10;
+
 /// Persisted user preferences.
 ///
 /// Every field has a serde default so that adding new fields later
@@ -25,9 +28,16 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub natpmp_enabled: bool,
 
-    /// Custom DNS server override (None = auto-detect from VPN/system).
+    /// Currently-selected custom DNS server (`None` = auto-detect from
+    /// VPN/system). Mirrors `App::dns.custom` on save.
     #[serde(default)]
     pub custom_dns: Option<String>,
+
+    /// Recently-used custom DNS servers, most-recent first, capped at
+    /// [`DNS_HISTORY_MAX`]. The picker shows these as a recall list under
+    /// the built-in presets. Orthogonal to `custom_dns` (the active value).
+    #[serde(default)]
+    pub dns_history: Vec<String>,
 
     /// What to do when the VPN interface drops mid-session.
     #[serde(default)]
@@ -44,6 +54,7 @@ impl Default for Config {
             dhcp_enabled: true,
             natpmp_enabled: true,
             custom_dns: None,
+            dns_history: Vec::new(),
             vpn_drop_strategy: VpnDropStrategy::default(),
         }
     }
@@ -58,16 +69,24 @@ impl Config {
     }
 
     /// Load config from disk, falling back to defaults on any error.
+    ///
+    /// Migrates a v0.1 config that only had `custom_dns` set by populating
+    /// `dns_history` with that value, so the previous picker entry shows up.
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-
         let Ok(contents) = fs::read_to_string(&path) else {
             return Self::default();
         };
-
-        serde_json::from_str(&contents).unwrap_or_default()
+        let mut cfg: Config = serde_json::from_str(&contents).unwrap_or_default();
+        if let Some(active) = cfg.custom_dns.as_deref() {
+            if !active.is_empty() && !cfg.dns_history.iter().any(|h| h == active) {
+                cfg.dns_history.insert(0, active.to_string());
+                cfg.dns_history.truncate(DNS_HISTORY_MAX);
+            }
+        }
+        cfg
     }
 
     /// Save config to disk. Creates parent directories if needed.
