@@ -1,6 +1,7 @@
 //! Active sharing session — owns all state that exists while VPN sharing is running.
 
 use std::net::Ipv4Addr;
+use std::time::Instant;
 
 use crate::health::HealthStatus;
 use crate::system::{DhcpServer, Firewall, IpForwarding, NatPmpServer};
@@ -35,6 +36,9 @@ pub struct SharingSession {
     natpmp_server: Option<NatPmpServer>,
     /// Connection health status (updated by periodic checks).
     pub health_status: HealthStatus,
+    /// When the VPN was first observed Down (None when healthy).
+    /// Used to compute the auto-stop countdown under `WaitWithTimeout`.
+    pub degraded_since: Option<Instant>,
 }
 
 impl SharingSession {
@@ -57,6 +61,7 @@ impl SharingSession {
             natpmp_active: false,
             natpmp_server: None,
             health_status: HealthStatus::default(),
+            degraded_since: None,
         }
     }
 

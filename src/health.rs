@@ -3,6 +3,9 @@
 //! Periodic checks that verify the VPN sharing setup is still working:
 //! VPN interface up, IP forwarding enabled.
 
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 /// Overall health status of the active sharing session.
@@ -15,6 +18,42 @@ pub enum HealthStatus {
     Degraded(String),
     /// VPN interface is down — traffic is not flowing.
     Down(String),
+}
+
+/// What to do when the VPN interface drops mid-session.
+///
+/// pf NAT rules egress on the VPN interface, so when utun goes down the
+/// kernel drops packets — they don't fail-open to the physical interface.
+/// That means the wait window has no leak risk; it's purely a UX choice
+/// between resilience to transient drops and aggressive teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum VpnDropStrategy {
+    /// Tear down `timeout_secs` after a VPN drop is first detected,
+    /// giving brief reconnects (rehandshake, IKE rekey, sleep/wake) a chance
+    /// to ride through without restarting the session.
+    WaitWithTimeout { timeout_secs: u64 },
+    /// Tear down immediately on first detected drop.
+    AutoStop,
+    /// Cosmetic-only: log the drop but keep everything running.
+    Ignore,
+}
+
+impl Default for VpnDropStrategy {
+    fn default() -> Self {
+        Self::WaitWithTimeout { timeout_secs: 15 }
+    }
+}
+
+impl VpnDropStrategy {
+    /// How long to wait before auto-stopping. `None` means never (Ignore).
+    pub fn wait_duration(self) -> Option<Duration> {
+        match self {
+            Self::WaitWithTimeout { timeout_secs } => Some(Duration::from_secs(timeout_secs)),
+            Self::AutoStop => Some(Duration::ZERO),
+            Self::Ignore => None,
+        }
+    }
 }
 
 /// Run health checks against the active sharing session.

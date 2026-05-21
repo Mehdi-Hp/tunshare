@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::health::VpnDropStrategy;
+
 /// Persisted user preferences.
 ///
 /// Every field has a serde default so that adding new fields later
@@ -26,6 +28,10 @@ pub struct Config {
     /// Custom DNS server override (None = auto-detect from VPN/system).
     #[serde(default)]
     pub custom_dns: Option<String>,
+
+    /// What to do when the VPN interface drops mid-session.
+    #[serde(default)]
+    pub vpn_drop_strategy: VpnDropStrategy,
 }
 
 fn default_true() -> bool {
@@ -38,6 +44,7 @@ impl Default for Config {
             dhcp_enabled: true,
             natpmp_enabled: true,
             custom_dns: None,
+            vpn_drop_strategy: VpnDropStrategy::default(),
         }
     }
 }

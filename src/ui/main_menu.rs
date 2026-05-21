@@ -17,16 +17,35 @@ use crate::ui::widgets::Card;
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let (status_text, status_style, status_icon) = if app.is_sharing() {
         match app.health_status() {
-            HealthStatus::Healthy => ("Active", styles::status_active(), symbols::STATUS_ACTIVE),
-            HealthStatus::Degraded(_) => ("Degraded", styles::status_degraded(), symbols::WARNING),
-            HealthStatus::Down(_) => ("VPN Down", styles::status_down(), symbols::ERROR),
+            HealthStatus::Healthy => (
+                "Active".to_string(),
+                styles::status_active(),
+                symbols::STATUS_ACTIVE,
+            ),
+            HealthStatus::Degraded(_) => (
+                "Degraded".to_string(),
+                styles::status_degraded(),
+                symbols::WARNING,
+            ),
+            HealthStatus::Down(_) => {
+                let text = match app.vpn_drop_countdown_secs() {
+                    Some(0) => "VPN Down · stopping".to_string(),
+                    Some(secs) => format!("VPN Down · auto-stop in {secs}s"),
+                    None => "VPN Down".to_string(),
+                };
+                (text, styles::status_down(), symbols::ERROR)
+            }
         }
     } else {
         let text = match app.state {
             AppState::SelectingVpn | AppState::SelectingLan | AppState::EditingDns => "Configuring",
             _ => "Inactive",
         };
-        (text, styles::status_inactive(), symbols::STATUS_INACTIVE)
+        (
+            text.to_string(),
+            styles::status_inactive(),
+            symbols::STATUS_INACTIVE,
+        )
     };
 
     // Build the header line
@@ -37,7 +56,9 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     // Calculate spacing
     let title_width = title.content.chars().count();
     let status_width = status.content.chars().count();
-    let spacing = area.width as usize - title_width - status_width;
+    let spacing = (area.width as usize)
+        .saturating_sub(title_width)
+        .saturating_sub(status_width);
 
     let header_line = Line::from(vec![title, Span::raw(" ".repeat(spacing.max(1))), status]);
 

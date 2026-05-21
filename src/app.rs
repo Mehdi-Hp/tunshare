@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::health::{self, HealthStatus};
+use crate::health::{self, HealthStatus, VpnDropStrategy};
 use crate::session::SharingSession;
 use crate::system::{
     detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns, dns::get_default_dns,
@@ -30,6 +30,11 @@ const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(3);
 
 /// Interval between periodic health checks while sharing is active.
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Faster recheck interval while the VPN is observed Down, so auto-stop
+/// fires close to the configured timeout rather than rounded up to the
+/// next 10-second tick.
+const HEALTH_RECHECK_DEGRADED: Duration = Duration::from_secs(3);
 
 /// Debug information about current system state.
 #[derive(Debug, Clone, Default)]
@@ -258,6 +263,8 @@ pub struct App {
     pub dnsmasq_installed: bool,
     /// Next scheduled health check time (None when not sharing).
     next_health_check: Option<Instant>,
+    /// User preference: how to react when the VPN drops mid-session.
+    pub vpn_drop_strategy: VpnDropStrategy,
 }
 
 /// Log entry for the status panel.
@@ -324,6 +331,7 @@ impl App {
             natpmp_enabled: config.natpmp_enabled,
             dnsmasq_installed: dnsmasq_available,
             next_health_check: None,
+            vpn_drop_strategy: config.vpn_drop_strategy,
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -361,6 +369,21 @@ impl App {
             .as_ref()
             .map(|s| &s.health_status)
             .unwrap_or(&HEALTHY)
+    }
+
+    /// Seconds remaining before auto-stop fires while VPN is down.
+    ///
+    /// Returns `None` when the strategy doesn't auto-stop (Ignore), when
+    /// the session isn't degraded, or when no session is active.
+    /// Returns `Some(0)` when the wait window has elapsed (stop is imminent).
+    pub fn vpn_drop_countdown_secs(&self) -> Option<u64> {
+        let session = self.session.as_ref()?;
+        if !matches!(session.health_status, HealthStatus::Down(_)) {
+            return None;
+        }
+        let wait = self.vpn_drop_strategy.wait_duration()?;
+        let since = session.degraded_since?;
+        Some(wait.saturating_sub(since.elapsed()).as_secs())
     }
 
     /// Set the pending operation and record its start time.
@@ -718,33 +741,88 @@ impl App {
                     }
                 }
             }
-            AsyncOpResult::HealthCheck { status } => {
-                // Only log when status changes to avoid spamming
-                let prev = self
-                    .session
-                    .as_ref()
-                    .map(|s| &s.health_status)
-                    .cloned()
-                    .unwrap_or_default();
+            AsyncOpResult::HealthCheck { status } => self.handle_health_result(status),
+        }
+    }
 
-                if status != prev {
-                    match &status {
-                        HealthStatus::Healthy => {
-                            self.log_success("Connection recovered");
+    /// Handle a health-check result, applying the configured VPN-drop strategy.
+    ///
+    /// Logs transitions, updates `session.health_status` and `session.degraded_since`,
+    /// reschedules the next check faster while degraded, and triggers
+    /// `stop_sharing_async` if the configured wait window has elapsed.
+    fn handle_health_result(&mut self, status: HealthStatus) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+
+        let now = Instant::now();
+        let was_down = matches!(session.health_status, HealthStatus::Down(_));
+        let now_down = matches!(status, HealthStatus::Down(_));
+        let transitioned = status != session.health_status;
+
+        // Track when we first observed Down; clear when recovered.
+        if now_down && !was_down {
+            session.degraded_since = Some(now);
+        } else if !now_down {
+            session.degraded_since = None;
+        }
+
+        let degraded_since = session.degraded_since;
+        session.health_status = status.clone();
+
+        // Log only on transitions to avoid spamming the log every 3 seconds
+        // while the VPN is down.
+        if transitioned {
+            match &status {
+                HealthStatus::Healthy => {
+                    if was_down {
+                        self.log_success("VPN recovered — sharing continues");
+                    } else {
+                        self.log_success("Connection recovered");
+                    }
+                }
+                HealthStatus::Degraded(reason) => {
+                    self.log_warning(format!("Connection degraded: {}", reason));
+                }
+                HealthStatus::Down(reason) => {
+                    self.log_warning(format!("VPN down: {}", reason));
+                    match self.vpn_drop_strategy {
+                        VpnDropStrategy::WaitWithTimeout { timeout_secs } => self.log_info(
+                            format!("Auto-stopping in {timeout_secs}s if VPN does not recover"),
+                        ),
+                        VpnDropStrategy::AutoStop => {
+                            self.log_warning("Auto-stop strategy: tearing down now")
                         }
-                        HealthStatus::Degraded(reason) => {
-                            self.log_warning(format!("Connection degraded: {}", reason));
-                        }
-                        HealthStatus::Down(reason) => {
-                            self.log_error(format!("Connection down: {}", reason));
+                        VpnDropStrategy::Ignore => {
+                            self.log_info("Ignore strategy: leaving sharing up")
                         }
                     }
                 }
-
-                if let Some(ref mut session) = self.session {
-                    session.health_status = status;
-                }
             }
+        }
+
+        // Decide whether to auto-stop. Only Down triggers the drop strategy;
+        // Degraded (IP forwarding flipped off) is recoverable without a teardown.
+        let should_stop = if now_down {
+            match self.vpn_drop_strategy.wait_duration() {
+                Some(wait) => {
+                    let since = degraded_since.unwrap_or(now);
+                    now.duration_since(since) >= wait
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        if should_stop {
+            self.log_warning("VPN-drop timeout exceeded — auto-stopping");
+            self.stop_sharing_async();
+        } else if now_down {
+            // Recheck more frequently so auto-stop fires close to the timeout.
+            self.next_health_check = Some(now + HEALTH_RECHECK_DEGRADED);
+        } else {
+            self.next_health_check = Some(now + HEALTH_CHECK_INTERVAL);
         }
     }
 
@@ -1526,6 +1604,7 @@ impl App {
             dhcp_enabled: self.dhcp_enabled,
             natpmp_enabled: self.natpmp_enabled,
             custom_dns: self.dns.custom.clone(),
+            vpn_drop_strategy: self.vpn_drop_strategy,
         }
         .save();
     }
@@ -1664,5 +1743,40 @@ mod tests {
         // No session attached — stop_sharing_async should log and bail to Menu.
         app.handle_key(KeyCode::Char('s'));
         assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn vpn_drop_countdown_only_set_when_session_down() {
+        let mut app = App::new();
+        // No session → countdown is None.
+        assert!(app.vpn_drop_countdown_secs().is_none());
+
+        // Attach a minimal session; manually set Down state.
+        app.session = Some(SharingSession::new(
+            crate::system::Firewall::new(),
+            crate::system::IpForwarding::new(),
+            "utun4".to_string(),
+            "en0".to_string(),
+            Ipv4Addr::new(192, 168, 2, 1),
+        ));
+
+        // Healthy session → no countdown.
+        assert!(app.vpn_drop_countdown_secs().is_none());
+
+        // Set Down with degraded_since 5s ago + 15s strategy → ~10s remaining.
+        if let Some(ref mut s) = app.session {
+            s.health_status = HealthStatus::Down("test".to_string());
+            s.degraded_since = Some(Instant::now() - Duration::from_secs(5));
+        }
+        app.vpn_drop_strategy = VpnDropStrategy::WaitWithTimeout { timeout_secs: 15 };
+        let remaining = app.vpn_drop_countdown_secs().expect("countdown set");
+        assert!(
+            (9..=10).contains(&remaining),
+            "expected ~10s remaining, got {remaining}"
+        );
+
+        // Ignore strategy → no countdown even when Down.
+        app.vpn_drop_strategy = VpnDropStrategy::Ignore;
+        assert!(app.vpn_drop_countdown_secs().is_none());
     }
 }
