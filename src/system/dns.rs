@@ -1,26 +1,27 @@
 //! VPN DNS server discovery via scutil --dns.
 
-use crate::error::{Result, TunshareError};
-use tokio::process::Command;
+use crate::error::Result;
+use crate::system::run_cmd;
 
 /// Discover DNS servers associated with a VPN interface.
 ///
 /// Parses `scutil --dns` output to find resolver configurations
 /// that are associated with the given VPN interface.
 pub async fn discover_vpn_dns(vpn_interface: &str) -> Result<Vec<String>> {
-    let output = Command::new("scutil")
-        .arg("--dns")
-        .output()
-        .await
-        .map_err(|e| TunshareError::CommandFailed {
-            command: "scutil --dns".into(),
-            message: e.to_string(),
-        })?;
-
+    let output = run_cmd("scutil", &["--dns"]).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let dns_servers = parse_dns_for_interface(&stdout, vpn_interface);
+    Ok(parse_dns_for_interface(&stdout, vpn_interface))
+}
 
-    Ok(dns_servers)
+/// Extract the address from a `nameserver[N] : addr` line, if present.
+fn parse_nameserver_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("nameserver[") {
+        return None;
+    }
+    let pos = trimmed.find(" : ")?;
+    let addr = trimmed[pos + 3..].trim();
+    (!addr.is_empty()).then(|| addr.to_string())
 }
 
 /// Parse scutil --dns output looking for DNS servers associated with interface.
@@ -32,9 +33,8 @@ fn parse_dns_for_interface(output: &str, interface: &str) -> Vec<String> {
     for line in output.lines() {
         let trimmed = line.trim();
 
-        // New resolver block
+        // New resolver block — flush prior matching block, reset state.
         if trimmed.starts_with("resolver #") {
-            // Save previous if it was relevant
             if in_relevant_resolver {
                 dns_servers.append(&mut current_nameservers);
             }
@@ -42,56 +42,32 @@ fn parse_dns_for_interface(output: &str, interface: &str) -> Vec<String> {
             current_nameservers.clear();
         }
 
-        // Check if this resolver is for our interface
-        // Look for "if_index : N (utun3)" pattern
-        if trimmed.starts_with("if_index") && trimmed.contains(&format!("({})", interface)) {
+        // Match by if_index "N (interface)" or by "interface" field directly.
+        if (trimmed.starts_with("if_index") && trimmed.contains(&format!("({})", interface)))
+            || (trimmed.starts_with("interface") && trimmed.contains(interface))
+        {
             in_relevant_resolver = true;
         }
 
-        // Also check for interface field directly
-        if trimmed.starts_with("interface") && trimmed.contains(interface) {
-            in_relevant_resolver = true;
-        }
-
-        // Collect nameservers
-        if trimmed.starts_with("nameserver[") {
-            // Format: "nameserver[0] : 10.8.0.1"
-            if let Some(pos) = trimmed.find(" : ") {
-                let server = trimmed[pos + 3..].trim().to_string();
-                if !server.is_empty() {
-                    current_nameservers.push(server);
-                }
-            }
+        if let Some(addr) = parse_nameserver_line(trimmed) {
+            current_nameservers.push(addr);
         }
     }
 
-    // Don't forget the last resolver block
     if in_relevant_resolver {
         dns_servers.extend(current_nameservers);
     }
 
-    // Deduplicate
     dns_servers.sort();
     dns_servers.dedup();
-
     dns_servers
 }
 
 /// Get the default DNS servers (from system configuration).
 pub async fn get_default_dns() -> Result<Vec<String>> {
-    let output = Command::new("scutil")
-        .arg("--dns")
-        .output()
-        .await
-        .map_err(|e| TunshareError::CommandFailed {
-            command: "scutil --dns".into(),
-            message: e.to_string(),
-        })?;
-
+    let output = run_cmd("scutil", &["--dns"]).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let dns_servers = parse_default_dns(&stdout);
-
-    Ok(dns_servers)
+    Ok(parse_default_dns(&stdout))
 }
 
 /// Parse default DNS from scutil output (looks for the primary resolver).
@@ -102,20 +78,15 @@ fn parse_default_dns(output: &str) -> Vec<String> {
     for line in output.lines() {
         let trimmed = line.trim();
 
-        // Look for "DNS configuration (for scoped queries)" or the first resolver
         if trimmed.starts_with("resolver #1") {
             in_default_resolver = true;
         } else if trimmed.starts_with("resolver #") && in_default_resolver {
-            // We've moved past the first resolver
             break;
         }
 
-        if in_default_resolver && trimmed.starts_with("nameserver[") {
-            if let Some(pos) = trimmed.find(" : ") {
-                let server = trimmed[pos + 3..].trim().to_string();
-                if !server.is_empty() {
-                    dns_servers.push(server);
-                }
+        if in_default_resolver {
+            if let Some(addr) = parse_nameserver_line(trimmed) {
+                dns_servers.push(addr);
             }
         }
     }

@@ -433,7 +433,7 @@ fn find_available_port(mappings: &HashMap<MappingKey, Mapping>, protocol: Protoc
 
 /// Get the IPv4 address of a network interface.
 async fn get_interface_ip(ifname: &str) -> Option<Ipv4Addr> {
-    let output = Command::new("ifconfig").arg(ifname).output().await.ok()?;
+    let output = crate::system::run_cmd("ifconfig", &[ifname]).await.ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {

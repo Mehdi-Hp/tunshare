@@ -1,8 +1,8 @@
 //! Network interface detection for VPN and LAN interfaces.
 
-use crate::error::{Result, TunshareError};
+use crate::error::Result;
+use crate::system::run_cmd;
 use std::net::Ipv4Addr;
-use tokio::process::Command;
 
 /// Information about a network interface.
 #[derive(Debug, Clone)]
@@ -15,14 +15,7 @@ pub struct InterfaceInfo {
 
 /// Detect VPN interfaces (utun* with IPv4 and point-to-point flag).
 pub async fn detect_vpn_interfaces() -> Result<Vec<InterfaceInfo>> {
-    let output = Command::new("ifconfig")
-        .arg("-a")
-        .output()
-        .await
-        .map_err(|e| TunshareError::CommandFailed {
-            command: "ifconfig -a".into(),
-            message: e.to_string(),
-        })?;
+    let output = run_cmd("ifconfig", &["-a"]).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let interfaces = parse_interfaces(&stdout);
@@ -40,29 +33,11 @@ pub async fn detect_vpn_interfaces() -> Result<Vec<InterfaceInfo>> {
 
 /// Detect LAN interfaces using networksetup to get hardware ports.
 pub async fn detect_lan_interfaces() -> Result<Vec<InterfaceInfo>> {
-    // Get hardware ports mapping
-    let ports_output = Command::new("networksetup")
-        .args(["-listallhardwareports"])
-        .output()
-        .await
-        .map_err(|e| TunshareError::CommandFailed {
-            command: "networksetup -listallhardwareports".into(),
-            message: e.to_string(),
-        })?;
-
+    let ports_output = run_cmd("networksetup", &["-listallhardwareports"]).await?;
     let ports_stdout = String::from_utf8_lossy(&ports_output.stdout);
     let port_map = parse_hardware_ports(&ports_stdout);
 
-    // Get interface details from ifconfig
-    let ifconfig_output = Command::new("ifconfig")
-        .arg("-a")
-        .output()
-        .await
-        .map_err(|e| TunshareError::CommandFailed {
-            command: "ifconfig -a".into(),
-            message: e.to_string(),
-        })?;
-
+    let ifconfig_output = run_cmd("ifconfig", &["-a"]).await?;
     let ifconfig_stdout = String::from_utf8_lossy(&ifconfig_output.stdout);
     let mut interfaces = parse_interfaces(&ifconfig_stdout);
 

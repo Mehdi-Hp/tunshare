@@ -1,8 +1,8 @@
 //! IP forwarding control via sysctl.
 
 use crate::error::{Result, TunshareError};
+use crate::system::run_cmd;
 use std::process::Command as SyncCommand;
-use tokio::process::Command;
 
 /// Manages IP forwarding state.
 pub struct IpForwarding {
@@ -19,15 +19,7 @@ impl IpForwarding {
 
     /// Get the current IP forwarding state.
     pub async fn get_state(&self) -> Result<bool> {
-        let output = Command::new("sysctl")
-            .arg("-n")
-            .arg("net.inet.ip.forwarding")
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "sysctl -n net.inet.ip.forwarding".into(),
-                message: e.to_string(),
-            })?;
+        let output = run_cmd("sysctl", &["-n", "net.inet.ip.forwarding"]).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let value = stdout.trim();
@@ -64,12 +56,6 @@ impl IpForwarding {
                 })??;
         }
         Ok(())
-    }
-
-    /// Disable IP forwarding.
-    #[allow(dead_code)]
-    pub async fn disable(&self) -> Result<()> {
-        self.set_state(false).await
     }
 
     async fn set_state(&self, enabled: bool) -> Result<()> {

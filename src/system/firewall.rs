@@ -1,9 +1,9 @@
 //! Packet filter (pf) firewall management.
 
 use crate::error::{Result, TunshareError};
+use crate::system::run_cmd;
 use std::fs;
 use std::path::Path;
-use tokio::process::Command;
 
 const PF_CONF_PATH: &str = "/tmp/tunshare_pf.conf";
 const DEFAULT_PF_CONF: &str = "/etc/pf.conf";
@@ -65,14 +65,7 @@ anchor "natpmp"
 
     /// Validate a pf configuration file.
     pub async fn validate_rules(config_path: &str) -> Result<()> {
-        let output = Command::new("pfctl")
-            .args(["-n", "-f", config_path])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -n -f".into(),
-                message: e.to_string(),
-            })?;
+        let output = run_cmd("pfctl", &["-n", "-f", config_path]).await?;
 
         let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -108,18 +101,11 @@ anchor "natpmp"
         // Validate first
         Self::validate_rules(&self.config_path).await?;
 
-        // Enable pf if not already enabled
-        let _ = Command::new("pfctl").args(["-e"]).output().await;
+        // Enable pf if not already enabled (best-effort)
+        let _ = run_cmd("pfctl", &["-e"]).await;
 
         // Load the rules
-        let output = Command::new("pfctl")
-            .args(["-f", &self.config_path])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -f".into(),
-                message: e.to_string(),
-            })?;
+        let output = run_cmd("pfctl", &["-f", &self.config_path]).await?;
 
         let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -168,25 +154,8 @@ anchor "natpmp"
     /// Get current pf rules (for debugging).
     /// Returns both NAT rules (-sn) and filter rules (-sr).
     pub async fn get_current_rules() -> Result<String> {
-        // Get NAT rules
-        let nat_output = Command::new("pfctl")
-            .args(["-sn"])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -sn".into(),
-                message: e.to_string(),
-            })?;
-
-        // Get filter rules
-        let filter_output = Command::new("pfctl")
-            .args(["-sr"])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -sr".into(),
-                message: e.to_string(),
-            })?;
+        let nat_output = run_cmd("pfctl", &["-sn"]).await?;
+        let filter_output = run_cmd("pfctl", &["-sr"]).await?;
 
         let nat_rules = String::from_utf8_lossy(&nat_output.stdout);
         let filter_rules = String::from_utf8_lossy(&filter_output.stdout);
@@ -207,36 +176,15 @@ anchor "natpmp"
 
     /// Get current pf states (for debugging).
     pub async fn get_current_states() -> Result<String> {
-        let output = Command::new("pfctl")
-            .args(["-ss"])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -ss".into(),
-                message: e.to_string(),
-            })?;
-
+        let output = run_cmd("pfctl", &["-ss"]).await?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     /// Check if pf is enabled.
     pub async fn is_enabled() -> Result<bool> {
-        let output = Command::new("pfctl")
-            .args(["-si"])
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "pfctl -si".into(),
-                message: e.to_string(),
-            })?;
-
+        let output = run_cmd("pfctl", &["-si"]).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.contains("Status: Enabled"))
-    }
-
-    #[allow(dead_code)]
-    pub fn is_loaded(&self) -> bool {
-        self.rules_loaded
     }
 
     /// Synchronous cleanup for use in Drop and async wrapper.

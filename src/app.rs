@@ -363,12 +363,6 @@ impl App {
             .unwrap_or(&HEALTHY)
     }
 
-    /// Check if there's a pending operation (UI should show loading indicator).
-    #[allow(dead_code)]
-    pub fn is_loading(&self) -> bool {
-        self.pending_op.is_some()
-    }
-
     /// Set the pending operation and record its start time.
     fn set_pending_op(&mut self, op: PendingOp) {
         self.pending_op = Some(op);
@@ -969,7 +963,10 @@ impl App {
         self.log_info("Stopping VPN sharing...");
         self.set_pending_op(PendingOp::StoppingSharing);
 
-        let session = self.session.as_mut().unwrap();
+        let session = self
+            .session
+            .as_mut()
+            .expect("session presence checked above");
         let dhcp_active = session.dhcp_active;
         let natpmp_active = session.natpmp_active;
 
@@ -1571,5 +1568,101 @@ impl Drop for App {
         // SharingSession::drop handles all cleanup in the correct order.
         // Dropping `self.session` triggers it automatically.
         drop(self.session.take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+
+    /// Find a menu item's index in the non-sharing menu layout.
+    /// Tests will fail loudly if the menu layout shifts.
+    fn menu_idx(app: &App, target: MenuItem) -> usize {
+        app.menu_items()
+            .iter()
+            .position(|m| std::mem::discriminant(m) == std::mem::discriminant(&target))
+            .expect("menu item must be present")
+    }
+
+    #[test]
+    fn initial_state_is_menu_and_not_quitting() {
+        let app = App::new();
+        assert_eq!(app.state, AppState::Menu);
+        assert_eq!(app.selected_menu_item, 0);
+        assert!(!app.should_quit);
+        assert!(app.session.is_none());
+    }
+
+    #[test]
+    fn menu_navigation_clamps_at_bounds() {
+        let mut app = App::new();
+        let last = app.menu_items().len() - 1;
+
+        // Up from 0 stays at 0.
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.selected_menu_item, 0);
+
+        // Down advances and clamps at last item.
+        for _ in 0..(last + 5) {
+            app.handle_key(KeyCode::Down);
+        }
+        assert_eq!(app.selected_menu_item, last);
+
+        // Up reduces by one.
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.selected_menu_item, last - 1);
+    }
+
+    #[test]
+    fn menu_enter_on_set_dns_transitions_to_editing_dns() {
+        let mut app = App::new();
+        app.selected_menu_item = menu_idx(&app, MenuItem::SetDns);
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.state, AppState::EditingDns);
+    }
+
+    #[test]
+    fn editing_dns_esc_returns_to_menu_without_save() {
+        let mut app = App::new();
+        app.state = AppState::EditingDns;
+        app.dns.edit_mode = DnsEditMode::SelectingPreset;
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn menu_q_sets_should_quit() {
+        let mut app = App::new();
+        app.handle_key(KeyCode::Char('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn active_esc_returns_to_menu_when_no_debug() {
+        let mut app = App::new();
+        app.state = AppState::Active;
+        app.show_debug = false;
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.state, AppState::Menu);
+    }
+
+    #[test]
+    fn active_esc_hides_debug_first() {
+        let mut app = App::new();
+        app.state = AppState::Active;
+        app.show_debug = true;
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.state, AppState::Active);
+        assert!(!app.show_debug);
+    }
+
+    #[test]
+    fn active_stop_without_session_returns_to_menu() {
+        let mut app = App::new();
+        app.state = AppState::Active;
+        // No session attached — stop_sharing_async should log and bail to Menu.
+        app.handle_key(KeyCode::Char('s'));
+        assert_eq!(app.state, AppState::Menu);
     }
 }

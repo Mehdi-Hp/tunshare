@@ -3,16 +3,9 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum TunshareError {
     #[error("Command failed: {command} - {message}")]
     CommandFailed { command: String, message: String },
-
-    #[error("No VPN interfaces found. Is your VPN connected?")]
-    NoVpnInterfaces,
-
-    #[error("No LAN interfaces found")]
-    NoLanInterfaces,
 
     #[error("Permission denied. Run with sudo.")]
     PermissionDenied,

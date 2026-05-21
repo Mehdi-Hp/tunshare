@@ -5,7 +5,6 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command as SyncCommand;
-use tokio::process::Command;
 
 const DNSMASQ_CONF_PATH: &str = "/tmp/tunshare-dnsmasq.conf";
 const DNSMASQ_PID_PATH: &str = "/tmp/tunshare-dnsmasq.pid";
@@ -149,14 +148,7 @@ dhcp-authoritative
 
         // Start dnsmasq (it will daemonize itself)
         let conf_arg = format!("--conf-file={}", DNSMASQ_CONF_PATH);
-        let output = Command::new(&dnsmasq_path)
-            .arg(&conf_arg)
-            .output()
-            .await
-            .map_err(|e| TunshareError::CommandFailed {
-                command: "dnsmasq".into(),
-                message: e.to_string(),
-            })?;
+        let output = crate::system::run_cmd(&dnsmasq_path, &[&conf_arg]).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

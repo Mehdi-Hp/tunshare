@@ -291,15 +291,14 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             }
         }
         MenuItem::SetDns => {
-            let value = if let Some(ref dns) = app.dns.custom {
-                dns.clone()
-            } else {
-                let effective = app.dns.effective();
-                if effective.is_empty() {
-                    "auto".to_string()
-                } else {
-                    effective.first().unwrap().clone()
-                }
+            let value = match app.dns.custom.as_deref() {
+                Some(dns) => dns.to_string(),
+                None => app
+                    .dns
+                    .effective()
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "auto".to_string()),
             };
             ("DNS Server".to_string(), Some(StatusBadge::Value(value)))
         }
@@ -342,19 +341,12 @@ fn render_dns_preset_list(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // Current value line
-    let current_text = if let Some(ref dns) = app.dns.custom {
-        format!("Current: {} (custom)", dns)
-    } else {
-        let effective = app.dns.effective();
-        if effective.is_empty() {
-            "Current: none".to_string()
-        } else {
-            format!(
-                "Current: {} ({})",
-                effective.first().unwrap(),
-                app.dns.source()
-            )
-        }
+    let current_text = match app.dns.custom.as_deref() {
+        Some(dns) => format!("Current: {} (custom)", dns),
+        None => match app.dns.effective().first() {
+            Some(dns) => format!("Current: {} ({})", dns, app.dns.source()),
+            None => "Current: none".to_string(),
+        },
     };
     let current_line = Line::from(Span::styled(
         current_text,
