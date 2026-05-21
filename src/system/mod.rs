@@ -11,7 +11,7 @@ pub use dhcp::DhcpServer;
 pub use dns::discover_vpn_dns;
 pub use firewall::Firewall;
 pub use natpmp::NatPmpServer;
-pub use network::{detect_lan_interfaces, detect_vpn_interfaces, InterfaceInfo};
+pub use network::{detect_lan_interfaces, detect_vpn_interfaces, same_ipv4_network, InterfaceInfo};
 pub use sysctl::IpForwarding;
 
 use crate::error::{Result, TunshareError};
