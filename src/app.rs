@@ -944,6 +944,28 @@ impl App {
         }
     }
 
+    /// Whether a menu item is non-interactive in the current state. Disabled
+    /// items render dimmed and are skipped by keyboard navigation.
+    pub fn is_menu_item_disabled(&self, item: &MenuItem) -> bool {
+        matches!(item, MenuItem::ToggleDhcp if !self.dnsmasq_installed)
+    }
+
+    /// Find the next enabled menu index in `direction` (+1 down, -1 up),
+    /// starting from `from`. Returns `from` if no enabled item exists in that
+    /// direction (caller stays put — acts like a clamp).
+    fn next_enabled_menu_index(&self, from: usize, direction: i32) -> usize {
+        let items = self.menu_items();
+        let len = items.len() as i32;
+        let mut i = from as i32 + direction;
+        while i >= 0 && i < len {
+            if !self.is_menu_item_disabled(&items[i as usize]) {
+                return i as usize;
+            }
+            i += direction;
+        }
+        from
+    }
+
     /// Refresh interface lists (async).
     fn refresh_interfaces_async(&mut self) {
         if self.pending_op.is_some() {
@@ -1442,17 +1464,16 @@ impl App {
 
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected_menu_item > 0 {
-                    self.selected_menu_item -= 1;
-                }
+                self.selected_menu_item = self.next_enabled_menu_index(self.selected_menu_item, -1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected_menu_item < items.len().saturating_sub(1) {
-                    self.selected_menu_item += 1;
-                }
+                self.selected_menu_item = self.next_enabled_menu_index(self.selected_menu_item, 1);
             }
             KeyCode::Enter => {
                 if let Some(item) = items.get(self.selected_menu_item) {
+                    if self.is_menu_item_disabled(item) {
+                        return;
+                    }
                     match item {
                         MenuItem::StartSharing => self.start_interface_selection(),
                         MenuItem::StopSharing => self.stop_sharing_async(),

@@ -220,7 +220,7 @@ fn render_menu_item(
     app: &App,
 ) {
     let is_selected = item_idx == app.selected_menu_item;
-    let is_disabled = is_menu_item_disabled(item, app);
+    let is_disabled = app.is_menu_item_disabled(item);
 
     let prefix = if is_selected && !is_disabled {
         format!("  {}  ", symbols::SELECTED)
@@ -328,11 +328,6 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
         MenuItem::RunDoctor => ("Run Doctor".to_string(), None),
         MenuItem::Quit => ("Quit".to_string(), None),
     }
-}
-
-/// Check if a menu item should be disabled (grayed out).
-fn is_menu_item_disabled(item: &MenuItem, app: &App) -> bool {
-    matches!(item, MenuItem::ToggleDhcp if !app.dnsmasq_installed)
 }
 
 /// Render the DNS editing overlay (dispatches by mode).
