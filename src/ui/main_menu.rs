@@ -141,12 +141,28 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
     let card_content_width = 42u16.max(area.width / 3);
     let card_content_height = rows.len() as u16;
     let card_width = (card_content_width + 2).min(area.width);
-    let card_height = (card_content_height + 2).min(area.height.saturating_sub(2));
+    let card_height = card_content_height + 2;
 
-    // Center the card
+    // Description block for the selected item: blank + title + 1-3 body lines.
+    // Width matches the card so the block reads as a unit.
+    let desc_width = card_width;
+    let selected_item = items.get(app.selected_menu_item);
+    let desc = selected_item.map(|item| menu_item_description(item, app));
+    // Reserve a fixed body height (max across all items) so the card doesn't
+    // shift vertically when the selected item's description has fewer lines.
+    const DESC_BODY_RESERVED: u16 = 3;
+    // Layout below card: blank, title, body lines, blank, hint
+    let desc_block_height = if desc.is_some() {
+        1 + 1 + DESC_BODY_RESERVED + 1 + 1
+    } else {
+        0
+    };
+
+    // Total block = card + description + hint. Center vertically together.
+    let total_height = (card_height + desc_block_height).min(area.height);
+    let block_y = area.y + (area.height.saturating_sub(total_height)) / 2;
     let card_x = area.x + (area.width.saturating_sub(card_width)) / 2;
-    let card_y = area.y + (area.height.saturating_sub(card_height)) / 2;
-    let card_area = Rect::new(card_x, card_y, card_width, card_height);
+    let card_area = Rect::new(card_x, block_y, card_width, card_height.min(area.height));
 
     // Draw the card with title
     let card = Card::new(Span::styled(" Menu ", styles::title())).focused(true);
@@ -178,18 +194,122 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Draw hint below card
-    let hint_y = card_area.y + card_area.height + 1;
-    if hint_y < area.y + area.height {
-        let hint_text = if app.is_sharing() {
-            "Press Enter to stop"
-        } else {
-            "Press Enter to start"
-        };
-        let hint = Paragraph::new(Line::from(Span::styled(hint_text, styles::hint())))
-            .alignment(Alignment::Center);
-        let hint_area = Rect::new(area.x, hint_y, area.width, 1);
-        frame.render_widget(hint, hint_area);
+    // Render description block below the card.
+    if let Some((title, body)) = desc {
+        let desc_x = card_x;
+        let mut y = card_area.y + card_area.height + 1; // blank row after card
+
+        // Title line: "╱ <label>"
+        if y < area.y + area.height {
+            let title_line = Line::from(vec![
+                Span::styled("  ╱ ", Style::default().fg(colors::ACCENT)),
+                Span::styled(title, styles::selected()),
+            ]);
+            let title_area = Rect::new(desc_x, y, desc_width, 1);
+            frame.render_widget(Paragraph::new(title_line), title_area);
+            y += 1;
+        }
+
+        // Body lines — render actual lines, but advance y by the reserved
+        // height so the hint stays pinned regardless of body length.
+        let body_start_y = y;
+        for (i, line_text) in body.iter().enumerate() {
+            let line_y = body_start_y + i as u16;
+            if line_y >= area.y + area.height {
+                break;
+            }
+            let body_line = Line::from(Span::styled(
+                format!("  {line_text}"),
+                Style::default().fg(colors::TEXT_SECONDARY),
+            ));
+            let body_area = Rect::new(desc_x, line_y, desc_width, 1);
+            frame.render_widget(Paragraph::new(body_line), body_area);
+        }
+        y = body_start_y + DESC_BODY_RESERVED;
+
+        // Blank, then hint
+        y += 1;
+        if y < area.y + area.height {
+            let hint_text = if app.is_sharing() {
+                "↑↓ navigate · Enter to stop · q to quit"
+            } else {
+                "↑↓ navigate · Enter to select · q to quit"
+            };
+            let hint = Paragraph::new(Line::from(Span::styled(hint_text, styles::hint())))
+                .alignment(Alignment::Center);
+            let hint_area = Rect::new(area.x, y, area.width, 1);
+            frame.render_widget(hint, hint_area);
+        }
+    }
+}
+
+/// Per-item description shown below the menu. Returns (title, body_lines).
+/// Body lines should be pre-wrapped to fit ~40 columns.
+fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'static str>) {
+    match item {
+        MenuItem::StartSharing => (
+            "Start VPN Sharing",
+            vec![
+                "Route your VPN traffic to LAN clients.",
+                "Connect to your VPN first, then select",
+                "the VPN and LAN interfaces.",
+            ],
+        ),
+        MenuItem::StopSharing => (
+            "Stop VPN Sharing",
+            vec![
+                "Tear down NAT, DHCP, and port mapping.",
+                "Safe to run anytime — cleans up fully.",
+            ],
+        ),
+        MenuItem::ToggleDhcp => {
+            if !app.dnsmasq_installed {
+                (
+                    "DHCP Server (unavailable)",
+                    vec![
+                        "dnsmasq is not installed. Run:",
+                        "  brew install dnsmasq",
+                        "Without it, clients need static IPs.",
+                    ],
+                )
+            } else {
+                (
+                    "DHCP Server",
+                    vec![
+                        "Hand out IPs to LAN clients via",
+                        "dnsmasq. Disable for static IPs.",
+                    ],
+                )
+            }
+        }
+        MenuItem::ToggleNatPmp => (
+            "NAT-PMP Server",
+            vec![
+                "Let LAN apps auto-open ports through",
+                "the gateway (games, file shares, etc).",
+            ],
+        ),
+        MenuItem::SetDns => (
+            "DNS Server",
+            vec![
+                "Pick the DNS pushed to LAN clients.",
+                "Auto-detect uses your VPN's DNS.",
+            ],
+        ),
+        MenuItem::RunDoctor => (
+            "Run Doctor",
+            vec![
+                "Diagnose firewall, IP forwarding,",
+                "interfaces, and dependencies.",
+            ],
+        ),
+        MenuItem::Quit => (
+            "Quit",
+            vec![
+                "Exit tunshare. Active sharing will be",
+                "stopped and cleaned up automatically.",
+            ],
+        ),
     }
 }
 
