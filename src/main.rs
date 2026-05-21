@@ -5,6 +5,7 @@
 
 mod app;
 mod config;
+mod doctor;
 mod error;
 mod health;
 mod session;
@@ -51,6 +52,9 @@ async fn main() -> Result<()> {
             "-h" | "--help" => {
                 print_help();
                 return Ok(());
+            }
+            "--doctor" => {
+                return run_doctor_cli().await;
             }
             other => {
                 eprintln!("tunshare: unknown argument: {other}");
@@ -101,12 +105,57 @@ USAGE:
 OPTIONS:
     -h, --help              Show this help and exit
     -V, --version           Print version and exit
+        --doctor            Run diagnostic checks and exit (non-zero on failure)
 
 Routes internet traffic through a VPN and shares it via LAN.
 Project home: {}",
         env!("CARGO_PKG_VERSION"),
         env!("CARGO_PKG_HOMEPAGE"),
     );
+}
+
+/// CLI mirror of the in-app Doctor screen.
+///
+/// Exits 0 when no checks fail, 1 otherwise. Some checks need root —
+/// without it they degrade to warnings rather than hard failures, so the
+/// command remains useful for non-root scripting (e.g. CI smoke tests).
+async fn run_doctor_cli() -> Result<()> {
+    use doctor::CheckStatus;
+
+    let results = doctor::run_checks().await;
+    let summary = doctor::CheckSummary::from_results(&results);
+
+    for r in &results {
+        let label = match &r.status {
+            CheckStatus::Pass => " OK ",
+            CheckStatus::Warn { .. } => "WARN",
+            CheckStatus::Fail { .. } => "FAIL",
+        };
+        println!("[{label}] {}", r.name);
+        for line in r.detail.lines() {
+            println!("       {line}");
+        }
+        match &r.status {
+            CheckStatus::Warn { hint } | CheckStatus::Fail { hint } => {
+                println!("       hint: {hint}");
+            }
+            CheckStatus::Pass => {}
+        }
+    }
+
+    println!();
+    println!(
+        "{} checks · {} pass · {} warn · {} fail",
+        summary.total(),
+        summary.pass,
+        summary.warn,
+        summary.fail,
+    );
+
+    if summary.fail > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn run_app() -> Result<()> {
@@ -174,6 +223,9 @@ async fn run_app() -> Result<()> {
                     if !app.show_debug {
                         render_connection_info(frame, chunks[2], &app);
                     }
+                }
+                AppState::Doctor => {
+                    ui::doctor::render_doctor(frame, chunks[2], &app);
                 }
                 AppState::EditingDns => {
                     render_main_menu(frame, chunks[2], &app);

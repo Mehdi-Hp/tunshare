@@ -96,9 +96,10 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
     for (i, item) in items.iter().enumerate() {
         match item {
             MenuItem::StartSharing | MenuItem::StopSharing => group_action.push((i, item)),
-            MenuItem::ToggleDhcp | MenuItem::ToggleNatPmp | MenuItem::SetDns => {
-                group_settings.push((i, item))
-            }
+            MenuItem::ToggleDhcp
+            | MenuItem::ToggleNatPmp
+            | MenuItem::SetDns
+            | MenuItem::RunDoctor => group_settings.push((i, item)),
             MenuItem::Quit => group_quit.push((i, item)),
         }
     }
@@ -283,6 +284,7 @@ fn menu_item_label_str(item: &MenuItem) -> &'static str {
         MenuItem::ToggleDhcp => "DHCP Server",
         MenuItem::ToggleNatPmp => "NAT-PMP Server",
         MenuItem::SetDns => "DNS Server",
+        MenuItem::RunDoctor => "Run Doctor",
         MenuItem::Quit => "Quit",
     }
 }
@@ -323,6 +325,7 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             };
             ("DNS Server".to_string(), Some(StatusBadge::Value(value)))
         }
+        MenuItem::RunDoctor => ("Run Doctor".to_string(), None),
         MenuItem::Quit => ("Quit".to_string(), None),
     }
 }

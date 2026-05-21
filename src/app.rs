@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, DNS_HISTORY_MAX};
+use crate::doctor::{self, CheckResult, CheckStatus, CheckSummary};
 use crate::error::Result;
 use crate::health::{self, HealthStatus, VpnDropStrategy};
 use crate::session::SharingSession;
@@ -94,6 +95,10 @@ pub enum AsyncOpResult {
     DebugInfoFetched { info: Result<DebugInfo> },
     /// Periodic health check result.
     HealthCheck { status: HealthStatus },
+    /// Doctor run completed.
+    DoctorFinished { results: Vec<CheckResult> },
+    /// Doctor flushed the stale pf anchor.
+    DoctorAnchorFlushed { result: Result<()> },
 }
 
 /// Pending async operation type (for UI display).
@@ -113,6 +118,10 @@ pub enum PendingOp {
     StoppingSharing,
     /// Fetching debug info.
     FetchingDebugInfo,
+    /// Running diagnostic checks.
+    RunningDoctor,
+    /// Flushing the stale pf anchor.
+    FlushingStaleAnchor,
 }
 
 impl PendingOp {
@@ -126,6 +135,8 @@ impl PendingOp {
             PendingOp::StartingNatPmp => "Starting NAT-PMP server...",
             PendingOp::StoppingSharing => "Stopping VPN sharing...",
             PendingOp::FetchingDebugInfo => "Fetching debug info...",
+            PendingOp::RunningDoctor => "Running diagnostic checks...",
+            PendingOp::FlushingStaleAnchor => "Flushing stale pf anchor...",
         }
     }
 }
@@ -281,6 +292,8 @@ pub struct App {
     next_health_check: Option<Instant>,
     /// User preference: how to react when the VPN drops mid-session.
     pub vpn_drop_strategy: VpnDropStrategy,
+    /// Diagnostic check results and screen state.
+    pub doctor: DoctorState,
 }
 
 /// Log entry for the status panel.
@@ -304,6 +317,8 @@ pub enum AppState {
     Active,
     /// Editing custom DNS server.
     EditingDns,
+    /// Viewing diagnostic check results.
+    Doctor,
 }
 
 /// Menu items.
@@ -314,7 +329,19 @@ pub enum MenuItem {
     ToggleDhcp,
     ToggleNatPmp,
     SetDns,
+    RunDoctor,
     Quit,
+}
+
+/// In-app Doctor screen state.
+#[derive(Debug, Default)]
+pub struct DoctorState {
+    /// Most recent check results (empty while running or before first run).
+    pub results: Vec<CheckResult>,
+    /// Cursor position in the result list.
+    pub selected: usize,
+    /// Whether the selected row's detail/hint is currently expanded.
+    pub expanded: bool,
 }
 
 impl App {
@@ -348,6 +375,7 @@ impl App {
             dnsmasq_installed: dnsmasq_available,
             next_health_check: None,
             vpn_drop_strategy: config.vpn_drop_strategy,
+            doctor: DoctorState::default(),
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -449,6 +477,13 @@ impl App {
                 PendingOp::FetchingDebugInfo => {
                     // Just dismiss, stay where we are
                 }
+                PendingOp::RunningDoctor => {
+                    // Bail out of the empty Doctor screen back to Menu.
+                    self.state = AppState::Menu;
+                }
+                PendingOp::FlushingStaleAnchor => {
+                    // Stay in Doctor state; user can re-run checks.
+                }
             }
         }
     }
@@ -487,6 +522,10 @@ impl App {
             (AsyncOpResult::DhcpStarted { .. }, Some(PendingOp::StartingDhcp)) => true,
             (AsyncOpResult::NatPmpStarted { .. }, Some(PendingOp::StartingNatPmp)) => true,
             (AsyncOpResult::DebugInfoFetched { .. }, Some(PendingOp::FetchingDebugInfo)) => true,
+            (AsyncOpResult::DoctorFinished { .. }, Some(PendingOp::RunningDoctor)) => true,
+            (AsyncOpResult::DoctorAnchorFlushed { .. }, Some(PendingOp::FlushingStaleAnchor)) => {
+                true
+            }
             _ => false,
         }
     }
@@ -758,6 +797,30 @@ impl App {
                 }
             }
             AsyncOpResult::HealthCheck { status } => self.handle_health_result(status),
+            AsyncOpResult::DoctorFinished { results } => {
+                self.clear_pending_op();
+                let summary = CheckSummary::from_results(&results);
+                self.log_info(format!(
+                    "Doctor: {} pass · {} warn · {} fail",
+                    summary.pass, summary.warn, summary.fail
+                ));
+                if self.doctor.selected >= results.len() {
+                    self.doctor.selected = 0;
+                }
+                self.doctor.results = results;
+                self.doctor.expanded = false;
+            }
+            AsyncOpResult::DoctorAnchorFlushed { result } => {
+                self.clear_pending_op();
+                match result {
+                    Ok(()) => {
+                        self.log_success("Flushed stale 'vpn_share' pf anchor");
+                        // Re-run checks so the user sees the resolution immediately.
+                        self.run_doctor_async();
+                    }
+                    Err(e) => self.log_error(format!("Failed to flush pf anchor: {e}")),
+                }
+            }
         }
     }
 
@@ -875,6 +938,7 @@ impl App {
                 MenuItem::ToggleDhcp,
                 MenuItem::ToggleNatPmp,
                 MenuItem::SetDns,
+                MenuItem::RunDoctor,
                 MenuItem::Quit,
             ]
         }
@@ -1181,6 +1245,80 @@ impl App {
     }
 
     /// Spawn a one-shot health check (no PendingOp — completely non-blocking).
+    /// Enter the Doctor screen and kick off a check run.
+    fn start_doctor(&mut self) {
+        self.state = AppState::Doctor;
+        self.doctor.expanded = false;
+        self.run_doctor_async();
+    }
+
+    /// Spawn a doctor run; UI shows a loading indicator until results arrive.
+    fn run_doctor_async(&mut self) {
+        if self.pending_op.is_some() {
+            return;
+        }
+        self.set_pending_op(PendingOp::RunningDoctor);
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let results = doctor::run_checks().await;
+            let _ = tx.send(AsyncOpResult::DoctorFinished { results });
+        });
+    }
+
+    /// Spawn an anchor-flush; result will trigger a fresh doctor run.
+    fn flush_stale_anchor_async(&mut self) {
+        if self.pending_op.is_some() {
+            return;
+        }
+        self.set_pending_op(PendingOp::FlushingStaleAnchor);
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = doctor::flush_stale_anchor().await;
+            let _ = tx.send(AsyncOpResult::DoctorAnchorFlushed { result });
+        });
+    }
+
+    /// Whether the current doctor results contain a stale-anchor failure.
+    /// Drives the `[c]` hint in the help bar.
+    pub fn doctor_has_stale_anchor(&self) -> bool {
+        self.doctor.results.iter().any(|r| {
+            matches!(r.status, CheckStatus::Fail { .. }) && r.name.contains("pf anchor clean")
+        })
+    }
+
+    fn handle_doctor_key(&mut self, key: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+
+        let count = self.doctor.results.len();
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.doctor.selected > 0 {
+                    self.doctor.selected -= 1;
+                    self.doctor.expanded = false;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.doctor.selected + 1 < count {
+                    self.doctor.selected += 1;
+                    self.doctor.expanded = false;
+                }
+            }
+            KeyCode::Enter => {
+                if count > 0 {
+                    self.doctor.expanded = !self.doctor.expanded;
+                }
+            }
+            KeyCode::Char('r') => self.run_doctor_async(),
+            KeyCode::Char('c') if self.doctor_has_stale_anchor() => {
+                self.flush_stale_anchor_async();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state = AppState::Menu;
+            }
+            _ => {}
+        }
+    }
+
     fn spawn_health_check(&mut self) {
         let Some(session) = self.session.as_ref() else {
             return;
@@ -1293,6 +1431,7 @@ impl App {
             AppState::SelectingLan => self.handle_lan_select_key(key),
             AppState::Active => self.handle_active_key(key),
             AppState::EditingDns => self.handle_dns_edit_key(key),
+            AppState::Doctor => self.handle_doctor_key(key),
         }
     }
 
@@ -1320,6 +1459,7 @@ impl App {
                         MenuItem::ToggleDhcp => self.toggle_dhcp_preference(),
                         MenuItem::ToggleNatPmp => self.toggle_natpmp_preference(),
                         MenuItem::SetDns => self.start_dns_edit(),
+                        MenuItem::RunDoctor => self.start_doctor(),
                         MenuItem::Quit => self.quit(),
                     }
                 }
@@ -1646,6 +1786,10 @@ impl App {
             AppState::SelectingLan => "↑/↓: Navigate  Enter: Select  ←: Back  Esc: Cancel",
             AppState::Active if self.show_debug => "d: Hide debug  s: Stop  l: Logs  q: Quit",
             AppState::Active => "s: Stop  d: Debug  l: Logs  q: Quit",
+            AppState::Doctor if self.doctor_has_stale_anchor() => {
+                "↑/↓: Navigate  Enter: Expand  r: Re-run  c: Clean stale anchor  Esc: Back"
+            }
+            AppState::Doctor => "↑/↓: Navigate  Enter: Expand  r: Re-run  Esc: Back",
             AppState::EditingDns => match self.dns.edit_mode {
                 DnsEditMode::SelectingPreset if !self.dns.history.is_empty() => {
                     "↑/↓: Navigate  Enter: Select  x: Remove recent  Esc: Cancel"
