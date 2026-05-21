@@ -39,6 +39,28 @@ use ui::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse minimal CLI flags before doing anything else. Useful for
+    // `brew test`, scripting, and not requiring sudo just to print --version.
+    let mut args = std::env::args().skip(1);
+    if let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-V" | "--version" => {
+                println!("tunshare {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "-h" | "--help" => {
+                print_help();
+                return Ok(());
+            }
+            other => {
+                eprintln!("tunshare: unknown argument: {other}");
+                eprintln!();
+                print_help();
+                std::process::exit(2);
+            }
+        }
+    }
+
     // Check for root privileges
     if !is_root() {
         eprintln!("Error: This program must be run as root (sudo).");
@@ -67,6 +89,24 @@ async fn main() -> Result<()> {
 
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
+}
+
+fn print_help() {
+    println!(
+        "tunshare {} - VPN sharing TUI for macOS
+
+USAGE:
+    sudo tunshare           Launch the TUI (requires root)
+
+OPTIONS:
+    -h, --help              Show this help and exit
+    -V, --version           Print version and exit
+
+Routes internet traffic through a VPN and shares it via LAN.
+Project home: {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_HOMEPAGE"),
+    );
 }
 
 async fn run_app() -> Result<()> {

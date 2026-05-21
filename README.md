@@ -22,9 +22,9 @@ tunshare exists because of that gap. It detects your VPN tunnel directly, sets u
 
 ## Requirements
 
-- **macOS** (uses `pf` firewall and macOS-specific `sysctl`)
+- **macOS 11 (Big Sur) or later** (uses `pf` firewall and macOS-specific `sysctl`)
 - **Root privileges** (`sudo`)
-- **Rust toolchain** (if building from source)
+- **Rust 1.85+** (if building from source)
 - **Optional:** `dnsmasq` for DHCP (`brew install dnsmasq`)
 - **Optional:** `just` for task runner commands (`brew install just`)
 

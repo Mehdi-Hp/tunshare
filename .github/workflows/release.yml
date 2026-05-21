@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  BIN: tunshare
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Package tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="${BIN}-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+          cp "target/${{ matrix.target }}/release/${BIN}" "dist/${stage}/"
+          cp README.md LICENSE CHANGELOG.md "dist/${stage}/"
+          (cd dist && tar -czf "${stage}.tar.gz" "${stage}")
+          shasum -a 256 "dist/${stage}.tar.gz" | awk '{print $1}' > "dist/${stage}.tar.gz.sha256"
+          echo "tarball=dist/${stage}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sha256_file=dist/${stage}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.sha256_file }}
+          fail_on_unmatched_files: true
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tap repository
+        uses: actions/checkout@v4
+        with:
+          repository: kumamaki/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Render formula
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          base="https://github.com/kumamaki/tunshare/releases/download/${VERSION}"
+
+          arm_url="${base}/${BIN}-${version}-aarch64-apple-darwin.tar.gz"
+          intel_url="${base}/${BIN}-${version}-x86_64-apple-darwin.tar.gz"
+
+          # Retry briefly in case the release assets are still propagating.
+          for i in 1 2 3 4 5; do
+            arm_sha=$(curl -fsSL "${arm_url}.sha256" | tr -d '[:space:]') && break
+            sleep 5
+          done
+          for i in 1 2 3 4 5; do
+            intel_sha=$(curl -fsSL "${intel_url}.sha256" | tr -d '[:space:]') && break
+            sleep 5
+          done
+
+          mkdir -p tap/Formula
+          cat > tap/Formula/tunshare.rb <<EOF
+          class Tunshare < Formula
+            desc "VPN sharing TUI for macOS"
+            homepage "https://github.com/kumamaki/tunshare"
+            license "MIT"
+            version "${version}"
+
+            depends_on :macos
+
+            on_arm do
+              url "${arm_url}"
+              sha256 "${arm_sha}"
+            end
+
+            on_intel do
+              url "${intel_url}"
+              sha256 "${intel_sha}"
+            end
+
+            def install
+              bin.install "${BIN}"
+              doc.install "README.md", "CHANGELOG.md", "LICENSE"
+            end
+
+            def caveats
+              <<~CAVEATS
+                tunshare requires root privileges to modify the packet filter:
+                  sudo tunshare
+
+                Optional: install dnsmasq for DHCP on connected devices:
+                  brew install dnsmasq
+              CAVEATS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/tunshare --version")
+            end
+          end
+          EOF
+
+      - name: Commit and push to tap
+        working-directory: tap
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Formula/tunshare.rb
+          if git diff --cached --quiet; then
+            echo "No formula changes; nothing to commit."
+            exit 0
+          fi
+          git commit -m "tunshare ${VERSION#v}"
+          git push
