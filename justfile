@@ -1,52 +1,36 @@
-# VPN Share - Task Runner
+# tunshare task runner. Run `just` with no args to see all recipes.
 
-# Set PATH to include cargo
-export PATH := env_var("HOME") + "/.cargo/bin:" + env_var("PATH")
-
-# Default recipe: show available commands
+# Show the recipe list.
 default:
-    @echo "Available commands: build, build-release, dev, run, run-release, lint, test, fmt, check, clean"
-    @echo "Run 'just --list' for details"
+    @just --list
 
-# Build debug version
+# Build the debug binary.
 build:
     cargo build
 
-# Build release version
-build-release:
-    cargo build --release
+# Build and run with sudo. Always rebuilds — no stale-binary trap.
+run: build
+    sudo ./target/debug/tunshare
 
-# Run in development mode (debug build)
-dev:
-    cargo run
-
-# Run release version (requires sudo)
-run:
-    sudo ./target/release/tunshare
-
-# Build and run release version
-run-release: build-release
-    sudo ./target/release/tunshare
-
-# Run clippy linter
+# Run clippy.
 lint:
     cargo clippy --all-targets
 
-# Run tests
+# Run tests.
 test:
     cargo test
 
-# Format code
+# Format code.
 fmt:
     cargo fmt
 
-# Check formatting without modifying
-fmt-check:
+# Full pre-commit check: fmt, lint, test, build.
+check:
     cargo fmt -- --check
+    cargo clippy --all-targets
+    cargo test
+    cargo build
 
-# Clean build artifacts
+# Clean build artifacts.
 clean:
     cargo clean
-
-# Full check: format, lint, test, build
-check: fmt-check lint test build

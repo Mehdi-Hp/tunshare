@@ -9,22 +9,16 @@ tunshare is a Rust TUI application for macOS that routes internet traffic throug
 ## Commands
 
 ```bash
-# Development
-just build          # Build debug version
-just dev            # Run in development mode (debug)
-just lint           # Run clippy
-just test           # Run tests
-just fmt            # Format code
-just fmt-check      # Check formatting without modifying
-just check          # Full check: fmt-check, lint, test, build
-just clean          # Clean build artifacts
-
-# Production (requires sudo)
-just build-release  # Build optimized release
-just run            # Run existing release binary with sudo
-just run-release    # Build and run release with sudo
-sudo ./target/release/tunshare  # Run directly
+just build   # Build the debug binary
+just run     # Build and run with sudo (always rebuilds — no stale-binary trap)
+just lint    # Run clippy
+just test    # Run tests
+just fmt     # Format code
+just check   # Full pre-commit: fmt-check, lint, test, build
+just clean   # Clean build artifacts
 ```
+
+Release builds are produced by CI for distribution. For ad-hoc optimized testing, run `cargo build --release` directly.
 
 ## Architecture
 
