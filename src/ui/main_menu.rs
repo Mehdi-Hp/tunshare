@@ -137,8 +137,23 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
         rows.push(MenuRow::Blank);
     }
 
-    // Calculate card dimensions
-    let card_content_width = 42u16.max(area.width / 3);
+    // Calculate card dimensions. Width must accommodate the widest
+    // label + badge pair plus the selection prefix and at least 4 cells of
+    // breathing room between them, otherwise the right-aligned badge will
+    // collide with the label (see `render_menu_item`'s gap math).
+    const PREFIX_WIDTH: u16 = 5;
+    const MIN_GAP: u16 = 4;
+    let widest_row = items
+        .iter()
+        .map(|item| {
+            let (label, status) = menu_item_label_status(item, app);
+            let label_w = label.chars().count() as u16;
+            let badge_w = status.as_ref().map(badge_width).unwrap_or(0);
+            PREFIX_WIDTH + label_w + MIN_GAP + badge_w
+        })
+        .max()
+        .unwrap_or(42);
+    let card_content_width = widest_row.max(42).min(area.width.saturating_sub(2));
     let card_content_height = rows.len() as u16;
     let card_width = (card_content_width + 2).min(area.width);
     let card_height = card_content_height + 2;
@@ -317,6 +332,17 @@ enum MenuRow<'a> {
     Blank,
     Separator,
     Item(usize, &'a MenuItem),
+}
+
+/// Width of a status badge when rendered. Must match the strings produced
+/// in `render_menu_item`'s match arms.
+fn badge_width(badge: &StatusBadge) -> u16 {
+    let s: &str = match badge {
+        StatusBadge::On => "● ON",
+        StatusBadge::Off => "○ OFF",
+        StatusBadge::Value(v) | StatusBadge::Disabled(v) => v.as_str(),
+    };
+    s.chars().count() as u16
 }
 
 /// Render a dotted separator line across the inner width.
