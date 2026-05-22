@@ -153,7 +153,7 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
         })
         .max()
         .unwrap_or(42);
-    let card_content_width = widest_row.max(42).min(area.width.saturating_sub(2));
+    let card_content_width = widest_row.max(60).min(area.width.saturating_sub(2));
     let card_content_height = rows.len() as u16;
     let card_width = (card_content_width + 2).min(area.width);
     let card_height = card_content_height + 2;
@@ -214,10 +214,10 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
         let desc_x = card_x;
         let mut y = card_area.y + card_area.height + 1; // blank row after card
 
-        // Title line: "╱ <label>"
+        // Title line: just the label, accented.
         if y < area.y + area.height {
             let title_line = Line::from(vec![
-                Span::styled("  ╱ ", Style::default().fg(colors::ACCENT)),
+                Span::raw("  "),
                 Span::styled(title, styles::selected()),
             ]);
             let title_area = Rect::new(desc_x, y, desc_width, 1);
