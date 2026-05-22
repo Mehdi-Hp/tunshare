@@ -182,7 +182,7 @@ async fn run_app() -> Result<()> {
             let size = frame.area();
 
             // Calculate log panel height based on expansion state
-            let log_height = if app.logs_expanded { 12 } else { 4 };
+            let log_height = if app.logs_expanded { 24 } else { 11 };
 
             // Main layout - new structure
             let chunks = Layout::default()
