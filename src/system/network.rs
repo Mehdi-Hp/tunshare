@@ -63,6 +63,10 @@ pub async fn detect_vpn_interfaces() -> Result<Vec<InterfaceInfo>> {
 }
 
 /// Detect LAN interfaces using networksetup to get hardware ports.
+///
+/// Wi-Fi interfaces are excluded even though they appear as `en*`: the Mac
+/// is a Wi-Fi client, not an AP, so installing NAT rules on it doesn't
+/// reach any clients. tunshare is wired-only by design — see README.
 pub async fn detect_lan_interfaces() -> Result<Vec<InterfaceInfo>> {
     let ports_output = run_cmd("networksetup", &["-listallhardwareports"]).await?;
     let ports_stdout = String::from_utf8_lossy(&ports_output.stdout);
@@ -72,20 +76,31 @@ pub async fn detect_lan_interfaces() -> Result<Vec<InterfaceInfo>> {
     let ifconfig_stdout = String::from_utf8_lossy(&ifconfig_output.stdout);
     let mut interfaces = parse_interfaces(&ifconfig_stdout);
 
-    // Filter to LAN interfaces (en*) that are up with IPv4
     let lan_interfaces: Vec<InterfaceInfo> = interfaces
         .iter_mut()
         .filter(|iface| iface.name.starts_with("en") && iface.is_up && iface.ipv4_address.is_some())
         .map(|iface| {
-            // Add description from hardware ports
             if let Some(desc) = port_map.get(&iface.name) {
                 iface.description = Some(desc.clone());
             }
             iface.clone()
         })
+        .filter(|iface| !is_wifi_port(iface.description.as_deref()))
         .collect();
 
     Ok(lan_interfaces)
+}
+
+/// True if the hardware-port description names a wireless interface.
+/// macOS uses "Wi-Fi" on modern releases and "AirPort" on older ones.
+fn is_wifi_port(description: Option<&str>) -> bool {
+    match description {
+        Some(d) => {
+            let d = d.to_ascii_lowercase();
+            d.contains("wi-fi") || d.contains("airport")
+        }
+        None => false,
+    }
 }
 
 /// Parse an ifconfig hex netmask like `0xffffff00` into an `Ipv4Addr`.

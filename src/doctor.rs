@@ -262,8 +262,8 @@ async fn check_lan_interfaces() -> Vec<CheckResult> {
     if ifaces.is_empty() {
         return vec![CheckResult::fail(
             "LAN interfaces",
-            "An en* interface (ethernet / USB ethernet) must be up with an IPv4 address",
-            "No en* interface is up with an IPv4 address.",
+            "Connect a wired adapter (ethernet / USB ethernet). Wi-Fi is excluded — the Mac would be a client, not an AP",
+            "No wired en* interface is up with an IPv4 address.",
         )];
     }
 

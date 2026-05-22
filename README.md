@@ -24,9 +24,25 @@ tunshare exists because of that gap. It detects your VPN tunnel directly, sets u
 
 - **macOS 11 (Big Sur) or later** (uses `pf` firewall and macOS-specific `sysctl`)
 - **Root privileges** (`sudo`)
+- **A wired LAN interface** (built-in ethernet, USB-ethernet, Thunderbolt-ethernet). See [Wired only](#wired-only) below.
 - **Rust 1.85+** (if building from source)
 - **Optional:** `dnsmasq` for DHCP (`brew install dnsmasq`)
 - **Optional:** `just` for task runner commands (`brew install just`)
+
+### Wired only
+
+tunshare shares VPN traffic over a **wired** network interface. Wi-Fi is excluded from the LAN picker because your Mac would be a Wi-Fi *client*, not an access point — installing NAT rules on `en0` when it's joined to someone else's SSID can't reach any other devices.
+
+If you want **wireless** clients to receive VPN traffic, the supported pattern is a travel router (or any router that supports AP mode) plugged into your Mac's ethernet:
+
+```
+ ┌────────────┐    VPN tunnel    ┌────────────┐    ethernet    ┌──────────┐    Wi-Fi    ┌─────────┐
+ │   utun*    │ ◄──────────────► │    Mac     │ ◄────────────► │  router  │ ◄────────► │ clients │
+ │  (VPN)     │                  │ (tunshare) │                │ (AP mode)│            │ (any)   │
+ └────────────┘                  └────────────┘                └──────────┘            └─────────┘
+```
+
+The Mac runs tunshare against the ethernet interface; the router's WAN port plugs into that ethernet; clients join the router's SSID and get VPN-tunneled internet. macOS's own Internet Sharing (which *can* drive a Wi-Fi AP) conflicts with tunshare's `pf` rules and is intentionally not used.
 
 ## Installation
 
