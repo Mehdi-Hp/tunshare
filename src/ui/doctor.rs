@@ -191,6 +191,11 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
 
     // Layout: prefix + name <gap> [value " "] badge
     // Badge always lands flush with the right edge.
+    //
+    // Keep ≥3 cells between name and value so they read as separate
+    // columns; 1 cell of breathing room is visually indistinguishable
+    // from "touching" when the value text is wide.
+    const MIN_NAME_VALUE_GAP: u16 = 3;
     let prefix_w = prefix.chars().count() as u16;
     let name_w = r.name.chars().count() as u16;
     let badge_w = badge.chars().count() as u16;
@@ -200,12 +205,13 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
         .width
         .saturating_sub(left_used)
         .saturating_sub(badge_w + value_pad_w)
-        .saturating_sub(1); // at least 1 space between name and value/badge
+        .saturating_sub(MIN_NAME_VALUE_GAP);
     let value_truncated = truncate_to(&value_str, available_for_value as usize);
     let value_w = value_truncated.chars().count() as u16;
     let gap = inner
         .width
-        .saturating_sub(left_used + value_w + value_pad_w + badge_w);
+        .saturating_sub(left_used + value_w + value_pad_w + badge_w)
+        .max(MIN_NAME_VALUE_GAP);
 
     let mut spans = vec![
         Span::styled(prefix, name_style),
