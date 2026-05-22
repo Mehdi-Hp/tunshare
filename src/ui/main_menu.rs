@@ -403,7 +403,7 @@ fn render_menu_item(
             StatusBadge::Value(v) => (v, styles::hint()),
             StatusBadge::Disabled(v) => (v, styles::status_off()),
         };
-        let badge_width = badge_text.len() as u16;
+        let badge_width = badge_text.chars().count() as u16;
         let gap = inner
             .width
             .saturating_sub(prefix_width + label_char_count + badge_width + 1);
