@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod install_modal;
 pub mod interface_select;
 pub mod main_menu;
+pub mod preflight_modal;
 pub mod status;
 pub mod theme;
 pub mod widgets;

@@ -334,15 +334,16 @@ enum MenuRow<'a> {
     Item(usize, &'a MenuItem),
 }
 
-/// Width of a status badge when rendered. Must match the strings produced
-/// in `render_menu_item`'s match arms.
+/// Width of a status badge when rendered. Mirrors the formatting in
+/// `render_menu_item` so card sizing accounts for the actual cell count.
 fn badge_width(badge: &StatusBadge) -> u16 {
-    let s: &str = match badge {
-        StatusBadge::On => "● ON",
-        StatusBadge::Off => "○ OFF",
-        StatusBadge::Value(v) | StatusBadge::Disabled(v) => v.as_str(),
-    };
-    s.chars().count() as u16
+    match badge {
+        StatusBadge::On => (symbols::STATUS_ACTIVE.chars().count() + " ON".chars().count()) as u16,
+        StatusBadge::Off => {
+            (symbols::STATUS_INACTIVE.chars().count() + " OFF".chars().count()) as u16
+        }
+        StatusBadge::Value(v) | StatusBadge::Disabled(v) => v.chars().count() as u16,
+    }
 }
 
 /// Render a dotted separator line across the inner width.
@@ -366,9 +367,8 @@ fn render_menu_item(
     app: &App,
 ) {
     let is_selected = item_idx == app.selected_menu_item;
-    let is_disabled = app.is_menu_item_disabled(item);
 
-    let prefix = if is_selected && !is_disabled {
+    let prefix = if is_selected {
         format!("  {}  ", symbols::SELECTED)
     } else {
         "     ".to_string()
@@ -376,9 +376,7 @@ fn render_menu_item(
 
     let (label, status) = menu_item_label_status(item, app);
 
-    let label_style = if is_disabled {
-        Style::default().fg(colors::TEXT_SECONDARY)
-    } else if is_selected {
+    let label_style = if is_selected {
         styles::selected()
     } else {
         styles::unselected()
@@ -410,7 +408,7 @@ fn render_menu_item(
             .width
             .saturating_sub(prefix_width + label_char_count + badge_width + 1);
         spans.push(Span::raw(" ".repeat(gap as usize)));
-        if is_selected && !is_disabled {
+        if is_selected {
             spans.push(Span::styled(badge_text, label_style));
         } else {
             spans.push(Span::styled(badge_text, badge_style));

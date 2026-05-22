@@ -3,7 +3,7 @@
 //! Step-based interface selection with tree-style details.
 
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -29,23 +29,16 @@ pub fn render_vpn_selection(frame: &mut Frame, area: Rect, app: &App) {
         area.height.saturating_sub(3),
     );
 
-    if app.vpn_interfaces.is_empty() {
-        render_no_interfaces(
-            frame,
-            content_area,
-            "VPN Interfaces",
-            "No VPN interfaces found",
-        );
-    } else {
-        render_interface_list(
-            frame,
-            content_area,
-            "VPN Interfaces",
-            &app.vpn_interfaces,
-            app.selected_vpn,
-            true,
-        );
-    }
+    // The pre-flight modal catches the empty case before we reach this
+    // screen, so we can render the list unconditionally.
+    render_interface_list(
+        frame,
+        content_area,
+        "VPN Interfaces",
+        &app.vpn_interfaces,
+        app.selected_vpn,
+        true,
+    );
 }
 
 /// Render the LAN interface selection (Step 2).
@@ -79,24 +72,15 @@ pub fn render_lan_selection(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Render LAN interface list
-    if app.lan_interfaces.is_empty() {
-        render_no_interfaces(
-            frame,
-            chunks[1],
-            "LAN Interfaces",
-            "No LAN interfaces found",
-        );
-    } else {
-        render_interface_list(
-            frame,
-            chunks[1],
-            "LAN Interfaces",
-            &app.lan_interfaces,
-            app.selected_lan,
-            true,
-        );
-    }
+    // Empty list is caught by the pre-flight modal before we reach here.
+    render_interface_list(
+        frame,
+        chunks[1],
+        "LAN Interfaces",
+        &app.lan_interfaces,
+        app.selected_lan,
+        true,
+    );
 }
 
 /// Render the step indicator line.
@@ -282,30 +266,4 @@ fn render_interface_list(
             y_offset += 1;
         }
     }
-}
-
-/// Render a message when no interfaces are found.
-pub fn render_no_interfaces(frame: &mut Frame, area: Rect, title: &str, message: &str) {
-    let card = Card::new(Span::styled(format!(" {} ", title), styles::card_title()));
-    frame.render_widget(card, area);
-
-    let inner = Rect::new(
-        area.x + 2,
-        area.y + 1,
-        area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
-    );
-
-    let msg_line = Line::from(vec![
-        Span::styled(symbols::WARNING, Style::default().fg(colors::WARNING)),
-        Span::raw(" "),
-        Span::styled(message, Style::default().fg(colors::ERROR)),
-    ]);
-
-    let msg_para = Paragraph::new(msg_line).alignment(Alignment::Center);
-
-    // Center vertically
-    let msg_y = inner.y + inner.height / 2;
-    let msg_area = Rect::new(inner.x, msg_y, inner.width, 1);
-    frame.render_widget(msg_para, msg_area);
 }

@@ -235,6 +235,10 @@ async fn run_app() -> Result<()> {
                     render_main_menu(frame, chunks[2], &app);
                     ui::install_modal::render_install_dnsmasq(frame, chunks[2], &app);
                 }
+                AppState::PreflightBlocked => {
+                    render_main_menu(frame, chunks[2], &app);
+                    ui::preflight_modal::render_preflight(frame, chunks[2], &app);
+                }
             }
 
             // Render loading indicator if operation is pending

@@ -70,6 +70,10 @@ pub struct App {
     pub(super) next_health_check: Option<Instant>,
     pub vpn_drop_strategy: VpnDropStrategy,
     pub doctor: DoctorState,
+    /// Where Esc should return to when leaving the Doctor screen. `None`
+    /// (the default) routes to `Menu`; set when the user enters Doctor
+    /// from a state we want to restore (e.g. `PreflightBlocked`).
+    pub(super) doctor_return_state: Option<AppState>,
 }
 
 impl App {
@@ -105,6 +109,7 @@ impl App {
             next_health_check: None,
             vpn_drop_strategy: config.vpn_drop_strategy,
             doctor: DoctorState::default(),
+            doctor_return_state: None,
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -215,6 +220,7 @@ impl App {
             AppState::Doctor => "↑/↓: Navigate  r: Re-run  Esc: Back",
             AppState::InstallDnsmasq if self.brew_installed => "Enter: Install  Esc: Cancel",
             AppState::InstallDnsmasq => "Esc: Dismiss",
+            AppState::PreflightBlocked => "r: Rescan  d: Doctor  Esc: Cancel",
             AppState::EditingDns => match self.dns.edit_mode {
                 DnsEditMode::SelectingPreset if !self.dns.history.is_empty() => {
                     "↑/↓: Navigate  Enter: Select  x: Remove recent  Esc: Cancel"

@@ -158,10 +158,11 @@ impl App {
             self.state = AppState::SelectingVpn;
             self.selected_vpn = Some(0);
             self.log_info("Select VPN interface to share from");
-        } else if self.vpn_interfaces.is_empty() {
-            self.log_error("No VPN interfaces found. Connect to VPN first.");
         } else {
-            self.log_error("No LAN interfaces found.");
+            // Pre-flight failed: at least one prerequisite is missing. The
+            // modal reads `vpn_interfaces` and `lan_interfaces` directly to
+            // decide which rows to show.
+            self.state = AppState::PreflightBlocked;
         }
     }
 
@@ -499,5 +500,50 @@ impl App {
         self.doctor.results.iter().any(|r| {
             matches!(r.status, CheckStatus::Fail { .. }) && r.name.contains("pf anchor clean")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn make_iface(name: &str) -> InterfaceInfo {
+        InterfaceInfo {
+            name: name.to_string(),
+            ipv4_address: Some(Ipv4Addr::new(192, 168, 1, 1)),
+            ipv4_netmask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+            description: None,
+            is_up: true,
+        }
+    }
+
+    #[test]
+    fn pre_flight_blocks_when_both_lists_empty() {
+        let mut app = App::new();
+        app.on_interfaces_detected(Ok(vec![]), Ok(vec![]));
+        assert_eq!(app.state, AppState::PreflightBlocked);
+    }
+
+    #[test]
+    fn pre_flight_blocks_when_only_vpn_missing() {
+        let mut app = App::new();
+        app.on_interfaces_detected(Ok(vec![]), Ok(vec![make_iface("en0")]));
+        assert_eq!(app.state, AppState::PreflightBlocked);
+    }
+
+    #[test]
+    fn pre_flight_blocks_when_only_lan_missing() {
+        let mut app = App::new();
+        app.on_interfaces_detected(Ok(vec![make_iface("utun0")]), Ok(vec![]));
+        assert_eq!(app.state, AppState::PreflightBlocked);
+    }
+
+    #[test]
+    fn pre_flight_passes_when_both_present() {
+        let mut app = App::new();
+        app.on_interfaces_detected(Ok(vec![make_iface("utun0")]), Ok(vec![make_iface("en0")]));
+        assert_eq!(app.state, AppState::SelectingVpn);
+        assert_eq!(app.selected_vpn, Some(0));
     }
 }

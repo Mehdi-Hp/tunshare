@@ -33,6 +33,18 @@ impl App {
             AppState::EditingDns => self.handle_dns_edit_key(key),
             AppState::Doctor => self.handle_doctor_key(key),
             AppState::InstallDnsmasq => self.handle_install_dnsmasq_key(key),
+            AppState::PreflightBlocked => self.handle_preflight_key(key),
+        }
+    }
+
+    fn handle_preflight_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_interfaces_async(),
+            KeyCode::Char('d') | KeyCode::Char('D') => self.start_doctor(),
+            // No `q` here — `q` means "quit" on the menu and we don't want
+            // muscle memory to surprise-route here.
+            KeyCode::Esc | KeyCode::Backspace => self.state = AppState::Menu,
+            _ => {}
         }
     }
 
@@ -41,16 +53,17 @@ impl App {
 
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected_menu_item = self.next_enabled_menu_index(self.selected_menu_item, -1);
+                if self.selected_menu_item > 0 {
+                    self.selected_menu_item -= 1;
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected_menu_item = self.next_enabled_menu_index(self.selected_menu_item, 1);
+                if self.selected_menu_item + 1 < items.len() {
+                    self.selected_menu_item += 1;
+                }
             }
             KeyCode::Enter => {
                 if let Some(item) = items.get(self.selected_menu_item) {
-                    if self.is_menu_item_disabled(item) {
-                        return;
-                    }
                     match item {
                         MenuItem::StartSharing => self.start_interface_selection(),
                         MenuItem::StopSharing => self.stop_sharing_async(),
@@ -220,7 +233,9 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Char('r') => self.run_doctor_async(),
             KeyCode::Char('c') if self.doctor_has_stale_anchor() => self.flush_stale_anchor_async(),
-            KeyCode::Esc | KeyCode::Char('q') => self.state = AppState::Menu,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state = self.doctor_return_state.take().unwrap_or(AppState::Menu);
+            }
             _ => {}
         }
     }
@@ -355,8 +370,15 @@ impl App {
         self.state = AppState::EditingDns;
     }
 
-    /// Enter the Doctor screen and kick off a check run.
+    /// Enter the Doctor screen and kick off a check run. Remembers the
+    /// previous state for select cases (e.g. PreflightBlocked) so Esc
+    /// returns the user to where they came from instead of dumping them
+    /// on the menu.
     fn start_doctor(&mut self) {
+        self.doctor_return_state = match self.state {
+            AppState::PreflightBlocked => Some(AppState::PreflightBlocked),
+            _ => None,
+        };
         self.state = AppState::Doctor;
         self.run_doctor_async();
     }
@@ -397,7 +419,7 @@ impl App {
                 // Stay in the modal — the loading indicator overlays it,
                 // and on_dnsmasq_installed transitions back to Menu.
             }
-            KeyCode::Esc | KeyCode::Char('q') => self.state = AppState::Menu,
+            KeyCode::Esc => self.state = AppState::Menu,
             _ => {}
         }
     }
