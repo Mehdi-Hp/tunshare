@@ -14,8 +14,15 @@ use crate::app::App;
 use crate::ui::theme::{colors, styles, symbols};
 use crate::ui::widgets::Card;
 
-const CARD_WIDTH: u16 = 60;
+const CARD_WIDTH: u16 = 74;
 const INDENT: &str = "   ";
+
+const DIAGRAM: &[&str] = &[
+    "┌─────────┐  VPN   ┌─────┐  cable  ┌────────┐  wifi  ┌────────┐",
+    "│ VPN srv │ ─────▶ │ Mac │ ──────▶ │ router │ ─────▶ │ phone  │",
+    "└─────────┘        └─────┘         └────────┘        └────────┘",
+    "                 (this app)       (travel AP)        (clients)",
+];
 
 pub fn render_preflight(frame: &mut Frame, area: Rect, app: &App) {
     let vpn_missing = app.vpn_interfaces.is_empty();
@@ -63,32 +70,31 @@ fn build_body(vpn_missing: bool, lan_missing: bool) -> Vec<Line<'static>> {
     if vpn_missing {
         lines.push(indented_with_prefix(
             &format!("{} ", symbols::ERROR),
-            "VPN connection",
+            "No VPN connection detected",
             error,
             primary,
         ));
-        lines.push(indented(
-            "  Open your VPN client app and connect, then",
-            muted,
-        ));
-        lines.push(indented("  rescan from this screen.", muted));
+        lines.push(indented("  Connect via your VPN app, then rescan.", muted));
         lines.push(blank());
     }
 
     if lan_missing {
         lines.push(indented_with_prefix(
             &format!("{} ", symbols::ERROR),
-            "Wired LAN adapter",
+            "No wired LAN adapter detected",
             error,
             primary,
         ));
-        lines.push(indented(
-            "  Wi-Fi is excluded by design. Connect a wired",
-            muted,
-        ));
-        lines.push(indented("  ethernet interface, then rescan.", muted));
+        lines.push(indented("  Plug one in, then rescan.", muted));
         lines.push(blank());
     }
+
+    lines.push(indented("Required setup:", muted));
+    lines.push(blank());
+    for row in DIAGRAM {
+        lines.push(indented_raw(row));
+    }
+    lines.push(blank());
 
     lines.push(divider());
     lines.push(blank());
@@ -105,6 +111,10 @@ fn blank() -> Line<'static> {
 
 fn indented(text: &'static str, style: Style) -> Line<'static> {
     Line::from(vec![Span::raw(INDENT), Span::styled(text, style)])
+}
+
+fn indented_raw(text: &'static str) -> Line<'static> {
+    Line::from(vec![Span::raw(INDENT), Span::raw(text)])
 }
 
 fn indented_with_prefix(
