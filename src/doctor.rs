@@ -149,20 +149,17 @@ async fn check_stale_anchor() -> CheckResult {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.trim().is_empty() {
-                CheckResult::pass(
-                    format!("'{PF_ANCHOR_NAME}' pf anchor clean"),
-                    "anchor has no NAT rules",
-                )
+                CheckResult::pass(format!("{PF_ANCHOR_NAME} pf anchor clean"), "")
             } else {
                 CheckResult::fail(
-                    format!("'{PF_ANCHOR_NAME}' pf anchor clean"),
+                    format!("{PF_ANCHOR_NAME} pf anchor clean"),
                     "Press [c] to flush, or run: sudo pfctl -a vpn_share -F all",
                     stdout.into_owned(),
                 )
             }
         }
         Err(e) => CheckResult::warn(
-            format!("'{PF_ANCHOR_NAME}' pf anchor clean"),
+            format!("{PF_ANCHOR_NAME} pf anchor clean"),
             "pfctl invocation failed (need root?)",
             e.to_string(),
         ),
@@ -181,14 +178,11 @@ async fn check_internet_sharing() -> CheckResult {
                     "Internet Sharing is on and will conflict with tunshare's pf rules.",
                 )
             } else {
-                CheckResult::pass("macOS Internet Sharing off", "Enabled = 0 or unset")
+                CheckResult::pass("macOS Internet Sharing off", "")
             }
         }
         // No NAT dict at all means Internet Sharing has never been configured.
-        Err(_) => CheckResult::pass(
-            "macOS Internet Sharing off",
-            "never configured (no NAT dict)",
-        ),
+        Err(_) => CheckResult::pass("macOS Internet Sharing off", ""),
     }
 }
 
@@ -205,7 +199,7 @@ async fn check_foreign_dnsmasq() -> CheckResult {
                 format!("running PIDs: {}", pids.join(", ")),
             )
         }
-        _ => CheckResult::pass("No foreign dnsmasq running", "pgrep found none"),
+        _ => CheckResult::pass("No foreign dnsmasq running", ""),
     }
 }
 
@@ -217,10 +211,7 @@ async fn check_natpmp_port() -> CheckResult {
             // First line is lsof's header; bound only if any process row follows.
             let rows: Vec<&str> = stdout.lines().skip(1).collect();
             if rows.is_empty() {
-                CheckResult::pass(
-                    format!("NAT-PMP port {NATPMP_PORT}/udp free"),
-                    "no process bound",
-                )
+                CheckResult::pass(format!("NAT-PMP port {NATPMP_PORT}/udp free"), "")
             } else {
                 CheckResult::warn(
                     format!("NAT-PMP port {NATPMP_PORT}/udp free"),
@@ -230,10 +221,7 @@ async fn check_natpmp_port() -> CheckResult {
             }
         }
         // lsof returns non-zero when nothing matches — that's the happy path.
-        _ => CheckResult::pass(
-            format!("NAT-PMP port {NATPMP_PORT}/udp free"),
-            "no process bound",
-        ),
+        _ => CheckResult::pass(format!("NAT-PMP port {NATPMP_PORT}/udp free"), ""),
     }
 }
 

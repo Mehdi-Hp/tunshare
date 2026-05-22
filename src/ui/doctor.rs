@@ -43,7 +43,6 @@ pub fn render_doctor(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Inner row budget (top to bottom):
-    //   1  top padding
     //   1  subtitle
     //   1  blank
     //   N  list rows
@@ -54,7 +53,7 @@ pub fn render_doctor(frame: &mut Frame, area: Rect, app: &App) {
     //   1  bottom padding
     const HINT_HEIGHT: u16 = 2;
     const SUMMARY_HEIGHT: u16 = 1;
-    const NON_LIST_HEIGHT: u16 = 1 + 1 + 1 + 1 + HINT_HEIGHT + 1 + SUMMARY_HEIGHT + 1;
+    const NON_LIST_HEIGHT: u16 = 1 + 1 + 1 + HINT_HEIGHT + 1 + SUMMARY_HEIGHT + 1;
 
     // Build display rows up front so we can size the card to fit content.
     let mut display_rows: Vec<DisplayRow> = Vec::new();
@@ -89,7 +88,7 @@ pub fn render_doctor(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // Inner row offsets (see NON_LIST_HEIGHT comment above for the budget).
-    let subtitle_y = inner.y + 1; // skip 1 row top padding
+    let subtitle_y = inner.y;
     let list_y = subtitle_y + 2; // subtitle + 1 blank
     let list_height = inner.height.saturating_sub(NON_LIST_HEIGHT);
 
@@ -169,43 +168,45 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
         styles::unselected()
     };
 
-    // Prefix: 4 chars. Selected row shows the cursor; others show indent.
+    // Prefix: 3 chars. Selected row shows the cursor; others show indent.
     let prefix = if is_selected {
         format!(" {} ", symbols::SELECTED)
     } else {
         "   ".to_string()
     };
 
-    // First line of detail rendered as a right-aligned value column. Multi-
-    // line details (rare) collapse to the first line; the hint pane below
-    // covers the rest.
     let value_str = r.detail.lines().next().unwrap_or("").to_string();
 
-    // Compute geometry: prefix(3) + icon(1) + space(1) + name + gap + value.
+    let value_style = Style::default().fg(colors::TEXT_SECONDARY);
+
+    // Layout: prefix + name <gap> [value " "] icon
+    // Icon always lands in the rightmost column.
     let prefix_w = prefix.chars().count() as u16;
     let name_w = r.name.chars().count() as u16;
-    let icon_w: u16 = 2; // icon + space
-    let used = prefix_w + icon_w + name_w;
-    let available_for_value = inner.width.saturating_sub(used + 1);
+    let icon_w: u16 = 1;
+    let value_pad_w: u16 = if value_str.is_empty() { 0 } else { 1 };
+    let left_used = prefix_w + name_w;
+    let available_for_value = inner
+        .width
+        .saturating_sub(left_used)
+        .saturating_sub(icon_w + value_pad_w)
+        .saturating_sub(1); // at least 1 space between name and value/icon
     let value_truncated = truncate_to(&value_str, available_for_value as usize);
     let value_w = value_truncated.chars().count() as u16;
-    let gap = inner.width.saturating_sub(used + value_w).saturating_sub(0);
-
-    let value_style = if is_selected {
-        name_style
-    } else {
-        Style::default().fg(colors::TEXT_SECONDARY)
-    };
+    let gap = inner
+        .width
+        .saturating_sub(left_used + value_w + value_pad_w + icon_w);
 
     let mut spans = vec![
         Span::styled(prefix, name_style),
-        Span::styled(format!("{icon} "), icon_style),
         Span::styled(r.name.clone(), name_style),
+        Span::raw(" ".repeat(gap as usize)),
     ];
     if !value_truncated.is_empty() {
-        spans.push(Span::raw(" ".repeat(gap as usize)));
         spans.push(Span::styled(value_truncated, value_style));
+        spans.push(Span::raw(" "));
     }
+    spans.push(Span::styled(icon.to_string(), icon_style));
 
     let area = Rect::new(inner.x, y, inner.width, 1);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -214,12 +215,8 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
 fn render_hint(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult) {
     let area = Rect::new(inner.x, y, inner.width, 2);
     let (marker_style, text) = match &r.status {
-        CheckStatus::Pass => {
-            // Avoid an empty pane — use it to show the full detail when it
-            // doesn't fit inline as the row value.
-            let text = r.detail.replace('\n', " · ");
-            (Style::default().fg(colors::TEXT_SECONDARY), text)
-        }
+        // Pass rows don't need a hint — the inline value already says it all.
+        CheckStatus::Pass => return,
         CheckStatus::Warn { hint } => (Style::default().fg(colors::WARNING), hint.clone()),
         CheckStatus::Fail { hint } => (Style::default().fg(colors::ERROR), hint.clone()),
     };
