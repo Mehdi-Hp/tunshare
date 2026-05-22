@@ -12,8 +12,8 @@ use crate::doctor::{self, CheckResult};
 use crate::error::{Result, TunshareError};
 use crate::health::{self, HealthStatus};
 use crate::system::{
-    detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns, dns::get_default_dns,
-    DhcpServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer,
+    brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns,
+    dns::get_default_dns, DhcpServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer,
 };
 
 use super::App;
@@ -30,6 +30,10 @@ pub(super) const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_DEBUG_INFO: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(3);
+
+/// `brew install dnsmasq` can be slow: cold tap update, formula download,
+/// dependency build. Generous ceiling — if we hit this, something's wrong.
+pub(super) const TIMEOUT_INSTALL_DNSMASQ: Duration = Duration::from_secs(300);
 
 /// Interval between periodic health checks while sharing is active.
 pub(super) const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -94,6 +98,13 @@ pub enum AsyncOpResult {
     DoctorAnchorFlushed {
         result: Result<()>,
     },
+    /// `brew install dnsmasq` finished. On failure, `stderr_tail` holds the
+    /// last few lines of stderr for logging — full output would flood the
+    /// log panel.
+    DnsmasqInstalled {
+        result: Result<()>,
+        stderr_tail: String,
+    },
 }
 
 /// Pending async operation (for UI display + stale-result guard).
@@ -108,6 +119,7 @@ pub enum PendingOp {
     FetchingDebugInfo,
     RunningDoctor,
     FlushingStaleAnchor,
+    InstallingDnsmasq,
 }
 
 impl PendingOp {
@@ -122,6 +134,7 @@ impl PendingOp {
             PendingOp::FetchingDebugInfo => "Fetching debug info...",
             PendingOp::RunningDoctor => "Running diagnostic checks...",
             PendingOp::FlushingStaleAnchor => "Flushing stale pf anchor...",
+            PendingOp::InstallingDnsmasq => "Installing dnsmasq via Homebrew...",
         }
     }
 }
@@ -479,6 +492,83 @@ impl App {
         tokio::spawn(async move {
             let results = doctor::run_checks().await;
             let _ = tx.send(AsyncOpResult::DoctorFinished { results });
+        });
+    }
+
+    /// Run `brew install dnsmasq`. Captures stdout/stderr; only the last
+    /// few lines of stderr are surfaced (full brew output would flood the
+    /// log panel). On success, `on_dnsmasq_installed` re-detects the
+    /// binary and flips `dnsmasq_installed`.
+    ///
+    /// We're already running as root (the app requires sudo), but `brew`
+    /// refuses to operate as root for safety. We drop privileges by
+    /// shelling out via `sudo -u <SUDO_USER>` when `SUDO_USER` is set —
+    /// which it always is when launched via `sudo tunshare`.
+    pub(super) fn install_dnsmasq_async(&mut self) {
+        if self.pending_op.is_some() {
+            return;
+        }
+
+        let Some(brew_path) = find_brew() else {
+            self.log_error("Homebrew not found — cannot install dnsmasq");
+            return;
+        };
+
+        self.log_info("Installing dnsmasq via Homebrew (this may take a minute)...");
+        self.set_pending_op(PendingOp::InstallingDnsmasq);
+
+        let sudo_user = std::env::var("SUDO_USER").ok();
+        let tx = self.op_tx.clone();
+
+        tokio::spawn(async move {
+            let mut cmd = if let Some(ref user) = sudo_user {
+                let mut c = tokio::process::Command::new("sudo");
+                c.args(["-u", user, &brew_path, "install", "dnsmasq"]);
+                c
+            } else {
+                // No SUDO_USER — best-effort, brew will likely refuse.
+                let mut c = tokio::process::Command::new(&brew_path);
+                c.args(["install", "dnsmasq"]);
+                c
+            };
+
+            let output = timeout(TIMEOUT_INSTALL_DNSMASQ, cmd.output()).await;
+
+            let (result, stderr_tail) = match output {
+                Ok(Ok(out)) if out.status.success() => (Ok(()), String::new()),
+                Ok(Ok(out)) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let tail: String = stderr
+                        .lines()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (
+                        Err(TunshareError::CommandFailed {
+                            command: "brew install dnsmasq".into(),
+                            message: format!("exit status {}", out.status),
+                        }),
+                        tail,
+                    )
+                }
+                Ok(Err(e)) => (
+                    Err(TunshareError::CommandFailed {
+                        command: "brew install dnsmasq".into(),
+                        message: e.to_string(),
+                    }),
+                    String::new(),
+                ),
+                Err(_) => (Err(timeout_err("brew install dnsmasq")), String::new()),
+            };
+
+            let _ = tx.send(AsyncOpResult::DnsmasqInstalled {
+                result,
+                stderr_tail,
+            });
         });
     }
 

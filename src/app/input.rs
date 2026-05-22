@@ -32,6 +32,7 @@ impl App {
             AppState::Active => self.handle_active_key(key),
             AppState::EditingDns => self.handle_dns_edit_key(key),
             AppState::Doctor => self.handle_doctor_key(key),
+            AppState::InstallDnsmasq => self.handle_install_dnsmasq_key(key),
         }
     }
 
@@ -53,7 +54,13 @@ impl App {
                     match item {
                         MenuItem::StartSharing => self.start_interface_selection(),
                         MenuItem::StopSharing => self.stop_sharing_async(),
-                        MenuItem::ToggleDhcp => self.toggle_dhcp_preference(),
+                        MenuItem::ToggleDhcp => {
+                            if self.dnsmasq_installed {
+                                self.toggle_dhcp_preference();
+                            } else {
+                                self.open_install_dnsmasq_modal();
+                            }
+                        }
                         MenuItem::ToggleNatPmp => self.toggle_natpmp_preference(),
                         MenuItem::SetDns => self.start_dns_edit(),
                         MenuItem::RunDoctor => self.start_doctor(),
@@ -365,11 +372,8 @@ impl App {
     }
 
     fn toggle_dhcp_preference(&mut self) {
-        if !self.dnsmasq_installed {
-            self.log_warning("Cannot toggle DHCP: dnsmasq not installed");
-            return;
-        }
-
+        // Caller in handle_menu_key already gates on `dnsmasq_installed` —
+        // when it's missing, the install modal is opened instead.
         self.dhcp_enabled = !self.dhcp_enabled;
         if self.dhcp_enabled {
             self.log_info("DHCP server enabled");
@@ -377,6 +381,25 @@ impl App {
             self.log_info("DHCP server disabled (manual router config required)");
         }
         self.save_preferences();
+    }
+
+    /// Enter the install-dnsmasq modal. Snapshots brew availability so the
+    /// renderer and key handler don't shell out per-frame.
+    fn open_install_dnsmasq_modal(&mut self) {
+        self.brew_installed = crate::system::brew_installed();
+        self.state = AppState::InstallDnsmasq;
+    }
+
+    fn handle_install_dnsmasq_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Enter if self.brew_installed => {
+                self.install_dnsmasq_async();
+                // Stay in the modal — the loading indicator overlays it,
+                // and on_dnsmasq_installed transitions back to Menu.
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.state = AppState::Menu,
+            _ => {}
+        }
     }
 
     fn toggle_natpmp_preference(&mut self) {

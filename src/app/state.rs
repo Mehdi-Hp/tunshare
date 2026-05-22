@@ -13,6 +13,8 @@ pub enum AppState {
     Active,
     EditingDns,
     Doctor,
+    /// Modal asking the user to install dnsmasq via Homebrew.
+    InstallDnsmasq,
 }
 
 /// Menu items. The actual list shown depends on whether sharing is active —
@@ -57,8 +59,13 @@ impl App {
 
     /// Whether a menu item is non-interactive in the current state. Disabled
     /// items render dimmed and are skipped by keyboard navigation.
-    pub fn is_menu_item_disabled(&self, item: &MenuItem) -> bool {
-        matches!(item, MenuItem::ToggleDhcp if !self.dnsmasq_installed)
+    ///
+    /// Note: items the user can't currently *act* on but can still navigate to
+    /// (e.g. DHCP when dnsmasq isn't installed — they should still be able to
+    /// read the description that tells them how to fix it) are not disabled
+    /// here. The Enter handler decides whether the action runs.
+    pub fn is_menu_item_disabled(&self, _item: &MenuItem) -> bool {
+        false
     }
 
     /// Find the next enabled menu index in `direction` (+1 down, -1 up),

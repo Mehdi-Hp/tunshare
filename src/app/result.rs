@@ -49,6 +49,10 @@ impl App {
             AsyncOpResult::HealthCheck { status } => self.handle_health_result(status),
             AsyncOpResult::DoctorFinished { results } => self.on_doctor_finished(results),
             AsyncOpResult::DoctorAnchorFlushed { result } => self.on_doctor_anchor_flushed(result),
+            AsyncOpResult::DnsmasqInstalled {
+                result,
+                stderr_tail,
+            } => self.on_dnsmasq_installed(result, stderr_tail),
         }
     }
 
@@ -71,6 +75,10 @@ impl App {
                 | (
                     AsyncOpResult::DoctorAnchorFlushed { .. },
                     Some(PendingOp::FlushingStaleAnchor)
+                )
+                | (
+                    AsyncOpResult::DnsmasqInstalled { .. },
+                    Some(PendingOp::InstallingDnsmasq)
                 )
         )
     }
@@ -98,6 +106,10 @@ impl App {
             PendingOp::RunningDoctor => self.state = AppState::Menu,
             // Stay in Doctor; user can re-run.
             PendingOp::FlushingStaleAnchor => {}
+            // brew install runs to completion; result is dropped by the
+            // stale guard. Return to Menu so the user isn't stuck on a
+            // half-cancelled modal.
+            PendingOp::InstallingDnsmasq => self.state = AppState::Menu,
         }
     }
 
@@ -341,6 +353,39 @@ impl App {
             self.doctor.selected = 0;
         }
         self.doctor.results = results;
+    }
+
+    fn on_dnsmasq_installed(&mut self, result: Result<()>, stderr_tail: String) {
+        self.clear_pending_op();
+        match result {
+            Ok(()) => {
+                // Re-detect — `brew install` succeeding doesn't guarantee
+                // dnsmasq actually landed in a path we look at.
+                let now_installed = crate::system::DhcpServer::is_dnsmasq_installed();
+                self.dnsmasq_installed = now_installed;
+                if now_installed {
+                    self.log_success("dnsmasq installed");
+                    // User triggered the install from the DHCP menu item —
+                    // flip it on so they don't need a second Enter.
+                    if !self.dhcp_enabled {
+                        self.dhcp_enabled = true;
+                        self.log_info("DHCP server enabled");
+                    }
+                    self.save_preferences();
+                } else {
+                    self.log_error(
+                        "brew install dnsmasq reported success but binary not found in expected paths",
+                    );
+                }
+            }
+            Err(e) => {
+                self.log_error(format!("brew install dnsmasq failed: {e}"));
+                for line in stderr_tail.lines() {
+                    self.log_error(format!("  {line}"));
+                }
+            }
+        }
+        self.state = AppState::Menu;
     }
 
     fn on_doctor_anchor_flushed(&mut self, result: Result<()>) {

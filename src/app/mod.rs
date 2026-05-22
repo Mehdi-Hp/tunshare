@@ -61,6 +61,10 @@ pub struct App {
     pub dhcp_enabled: bool,
     pub natpmp_enabled: bool,
     pub dnsmasq_installed: bool,
+    /// Snapshot of `brew_installed()` taken when the InstallDnsmasq modal
+    /// opens. Rendered each frame, so we cache instead of shelling out per
+    /// draw call. Refreshed every time the modal is entered.
+    pub brew_installed: bool,
 
     /// Next scheduled health check time (None when not sharing).
     pub(super) next_health_check: Option<Instant>,
@@ -97,6 +101,7 @@ impl App {
             dhcp_enabled: config.dhcp_enabled && dnsmasq_available,
             natpmp_enabled: config.natpmp_enabled,
             dnsmasq_installed: dnsmasq_available,
+            brew_installed: false,
             next_health_check: None,
             vpn_drop_strategy: config.vpn_drop_strategy,
             doctor: DoctorState::default(),
@@ -208,6 +213,8 @@ impl App {
                 "↑/↓: Navigate  r: Re-run  c: Clean stale anchor  Esc: Back"
             }
             AppState::Doctor => "↑/↓: Navigate  r: Re-run  Esc: Back",
+            AppState::InstallDnsmasq if self.brew_installed => "Enter: Install  Esc: Cancel",
+            AppState::InstallDnsmasq => "Esc: Dismiss",
             AppState::EditingDns => match self.dns.edit_mode {
                 DnsEditMode::SelectingPreset if !self.dns.history.is_empty() => {
                     "↑/↓: Navigate  Enter: Select  x: Remove recent  Esc: Cancel"

@@ -267,7 +267,7 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
                 (
                     "DHCP Server (unavailable)",
                     vec![
-                        "dnsmasq is not installed. Run:",
+                        "Hands out IPs automatically. Install:",
                         "  brew install dnsmasq",
                         "Without it, clients need static IPs.",
                     ],
@@ -418,7 +418,9 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             if !app.dnsmasq_installed {
                 (
                     "DHCP Server".to_string(),
-                    Some(StatusBadge::Disabled("not installed".to_string())),
+                    Some(StatusBadge::Disabled(
+                        "Select to install dnsmasq".to_string(),
+                    )),
                 )
             } else if app.dhcp_enabled {
                 ("DHCP Server".to_string(), Some(StatusBadge::On))
