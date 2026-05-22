@@ -6,6 +6,8 @@
   </picture>
 </p>
 
+
+
 # tunshare
 
 A macOS TUI application that shares your VPN connection over LAN. Point other devices at your Mac and they get VPN-tunneled internet without needing their own VPN client.
@@ -43,11 +45,13 @@ tunshare shares VPN traffic over a **wired** network interface. Wi-Fi is exclude
 
 If you want **wireless** clients to receive VPN traffic, the supported pattern is a travel router (or any router that supports AP mode) plugged into your Mac's ethernet:
 
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/diagram-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="./assets/diagram-light.png">
   <img src="./assets/diagram-light.png" alt="Topology: VPN → Mac (tunshare) → router (AP mode) → Wi-Fi clients">
 </picture>
+
 
 The Mac runs tunshare against the ethernet interface; the router's WAN port plugs into that ethernet; clients join the router's SSID and get VPN-tunneled internet. macOS's own Internet Sharing (which *can* drive a Wi-Fi AP) conflicts with tunshare's `pf` rules and is intentionally not used.
 
