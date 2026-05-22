@@ -156,10 +156,20 @@ fn render_group_header(frame: &mut Frame, inner: Rect, y: u16, group: &str) {
 }
 
 fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_selected: bool) {
-    let (icon, icon_style) = match &r.status {
-        CheckStatus::Pass => ("\u{2713}", Style::default().fg(colors::SUCCESS)),
-        CheckStatus::Warn { .. } => (symbols::WARNING, Style::default().fg(colors::WARNING)),
-        CheckStatus::Fail { .. } => (symbols::ERROR, Style::default().fg(colors::ERROR)),
+    // Status badge: matches the "● ON" style used on the main menu.
+    let (badge, badge_style) = match &r.status {
+        CheckStatus::Pass => (
+            format!("{} Good", symbols::STATUS_ACTIVE),
+            Style::default().fg(colors::SUCCESS),
+        ),
+        CheckStatus::Warn { .. } => (
+            format!("{} Warn", symbols::STATUS_ACTIVE),
+            Style::default().fg(colors::WARNING),
+        ),
+        CheckStatus::Fail { .. } => (
+            format!("{} Fail", symbols::STATUS_ACTIVE),
+            Style::default().fg(colors::ERROR),
+        ),
     };
 
     let name_style = if is_selected {
@@ -179,23 +189,23 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
 
     let value_style = Style::default().fg(colors::TEXT_SECONDARY);
 
-    // Layout: prefix + name <gap> [value " "] icon
-    // Icon always lands in the rightmost column.
+    // Layout: prefix + name <gap> [value " "] badge
+    // Badge always lands flush with the right edge.
     let prefix_w = prefix.chars().count() as u16;
     let name_w = r.name.chars().count() as u16;
-    let icon_w: u16 = 1;
+    let badge_w = badge.chars().count() as u16;
     let value_pad_w: u16 = if value_str.is_empty() { 0 } else { 1 };
     let left_used = prefix_w + name_w;
     let available_for_value = inner
         .width
         .saturating_sub(left_used)
-        .saturating_sub(icon_w + value_pad_w)
-        .saturating_sub(1); // at least 1 space between name and value/icon
+        .saturating_sub(badge_w + value_pad_w)
+        .saturating_sub(1); // at least 1 space between name and value/badge
     let value_truncated = truncate_to(&value_str, available_for_value as usize);
     let value_w = value_truncated.chars().count() as u16;
     let gap = inner
         .width
-        .saturating_sub(left_used + value_w + value_pad_w + icon_w);
+        .saturating_sub(left_used + value_w + value_pad_w + badge_w);
 
     let mut spans = vec![
         Span::styled(prefix, name_style),
@@ -206,7 +216,7 @@ fn render_check_row(frame: &mut Frame, inner: Rect, y: u16, r: &CheckResult, is_
         spans.push(Span::styled(value_truncated, value_style));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(icon.to_string(), icon_style));
+    spans.push(Span::styled(badge, badge_style));
 
     let area = Rect::new(inner.x, y, inner.width, 1);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
