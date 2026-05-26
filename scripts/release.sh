@@ -115,8 +115,14 @@ if git ls-remote --tags --exit-code "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; 
   exit 1
 fi
 
-# Strict monotonic check against the highest existing v*.*.* tag.
-LAST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged "$REMOTE/main" --sort=-version:refname | head -1 || true)"
+# Strict monotonic check against the highest existing X.Y.Z tag. The git
+# `--list` arg is a shell glob (not a regex), so it can't exclude
+# pre-release suffixes like `-dev1` — filter with grep to keep only strict
+# vX.Y.Z. Pre-releases are intentionally ignored: they're not part of the
+# stable line, and `sort -V` orders them as "newer than" their release,
+# which would block the actual release.
+LAST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged "$REMOTE/main" --sort=-version:refname \
+  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
 if [[ -n "$LAST_TAG" ]]; then
   PREV="${LAST_TAG#v}"
   HIGHER="$(printf '%s\n%s\n' "$PREV" "$VERSION" | sort -V | tail -1)"

@@ -55,7 +55,9 @@ ship kind:
       *) echo "usage: just ship <major|minor|patch>" >&2; exit 2 ;;
     esac
     git fetch origin main --quiet
-    latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged origin/main --sort=-version:refname | head -1)"
+    # Restrict to strict vX.Y.Z (the --list arg is a glob; can't reject -dev1 suffixes there).
+    latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged origin/main --sort=-version:refname \
+      | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
     latest="${latest:-v0.0.0}"
     IFS=. read -r major minor patch <<< "${latest#v}"
     case "{{kind}}" in
