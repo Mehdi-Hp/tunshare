@@ -7,6 +7,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-27
+
 ### Added
 - `--version` and `--help` flags.
 - Homebrew distribution via `kumamaki/homebrew-tap`.
@@ -50,5 +52,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Debug overlay with live pf rules, NAT-PMP mappings, interface state.
 - Drop-safe cleanup of all firewall, IP forwarding, DHCP, and NAT-PMP state.
 
-[Unreleased]: https://github.com/kumamaki/tunshare/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kumamaki/tunshare/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kumamaki/tunshare/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kumamaki/tunshare/releases/tag/v0.1.0
