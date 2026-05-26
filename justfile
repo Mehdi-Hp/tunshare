@@ -34,3 +34,37 @@ check:
 # Clean build artifacts.
 clean:
     cargo clean
+
+# === Release ================================================================
+
+# Delegates to scripts/release.sh, which validates preconditions (clean tree,
+# in sync with origin, monotonic version), bumps Cargo.{toml,lock} +
+# CHANGELOG.md, commits, tags origin/main, and pushes — which triggers
+# .github/workflows/release.yml (build, GitHub release, Homebrew tap update).
+#
+# For a dry-run preview without prompting:
+#   ./scripts/release.sh --version 1.2.3                    # prints plan, leaves bump in worktree
+#   ./scripts/release.sh --version 1.2.3 --confirm --watch  # prompt, ship, watch CI
+#
+# Bump v* tag (major|minor|patch), confirm, then push to trigger the release.
+ship kind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{kind}}" in
+      major|minor|patch) ;;
+      *) echo "usage: just ship <major|minor|patch>" >&2; exit 2 ;;
+    esac
+    git fetch origin main --quiet
+    latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged origin/main --sort=-version:refname | head -1)"
+    latest="${latest:-v0.0.0}"
+    IFS=. read -r major minor patch <<< "${latest#v}"
+    case "{{kind}}" in
+      major) major=$((major+1)); minor=0; patch=0 ;;
+      minor) minor=$((minor+1)); patch=0 ;;
+      patch) patch=$((patch+1)) ;;
+    esac
+    next="${major}.${minor}.${patch}"
+    echo "==> bumping {{kind}}: ${latest} → v${next}"
+    echo
+    ./scripts/release.sh --version "${next}" --confirm
+    open https://github.com/kumamaki/tunshare/actions
