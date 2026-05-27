@@ -44,6 +44,39 @@ pub fn same_ipv4_network(a: &InterfaceInfo, b: &InterfaceInfo) -> bool {
     }
 }
 
+/// Read the interface name from `route -n get default` (IPv4 default route).
+///
+/// Returns `Ok(Some(name))` for the iface carrying the default route (a
+/// `utun*` while a VPN is up, an `en*` when it's not), `Ok(None)` when no
+/// default route exists, and an `Err` only when the command itself fails
+/// to execute. Parse failures collapse to `Ok(None)` — better to treat an
+/// unrecognized table as "no default route" than to bubble an error up
+/// into the health probe.
+pub async fn default_route_interface() -> Result<Option<String>> {
+    let output = run_cmd("route", &["-n", "get", "default"]).await?;
+    if !output.status.success() {
+        // No default route → route(8) exits non-zero. Not an error.
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_default_route_interface(&stdout))
+}
+
+/// Extract the iface name from a `route -n get default` block. The relevant
+/// line looks like `  interface: utun10`.
+fn parse_default_route_interface(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("interface:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Detect VPN interfaces (utun* with IPv4 and point-to-point flag).
 pub async fn detect_vpn_interfaces() -> Result<Vec<InterfaceInfo>> {
     let output = run_cmd("ifconfig", &["-a"]).await?;
@@ -234,6 +267,26 @@ fn parse_hardware_ports(output: &str) -> std::collections::HashMap<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_default_route_extracts_interface() {
+        let output = "   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.1.1
+  interface: utun10
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>";
+        assert_eq!(
+            parse_default_route_interface(output),
+            Some("utun10".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_default_route_returns_none_when_missing() {
+        let output = "route to: default\nflags: <UP,GATEWAY>";
+        assert_eq!(parse_default_route_interface(output), None);
+    }
 
     #[test]
     fn test_parse_interfaces() {

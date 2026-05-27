@@ -4,6 +4,14 @@ use crate::config::DNS_HISTORY_MAX;
 
 use super::App;
 
+/// Stable DNS handed to LAN clients when the user hasn't set a custom one.
+/// Intentionally NOT the VPN's pushed resolver: that's a tunnel-internal IP
+/// (e.g. Windscribe's 10.255.255.1) which becomes unreachable the moment
+/// the user switches VPN provider/protocol, silently breaking LAN DNS
+/// until tunshare is restarted. A public resolver works on every tunnel,
+/// and its queries still ride the active VPN via our NAT (so no leak).
+pub const STABLE_DEFAULT_DNS: &str = "1.1.1.1";
+
 /// A DNS preset entry.
 #[derive(Debug, Clone)]
 pub struct DnsPreset {
@@ -82,14 +90,16 @@ impl DnsConfig {
         self.history.truncate(DNS_HISTORY_MAX);
     }
 
-    /// Get the effective DNS servers (custom > vpn > system).
+    /// DNS to hand out (via DHCP) and display as "in use on the LAN".
+    ///
+    /// Order: custom > stable default. `vpn_servers` is intentionally
+    /// excluded — see [`STABLE_DEFAULT_DNS`] for the why. Still collected
+    /// for visibility (debug panel, future use).
     pub fn effective(&self) -> Vec<String> {
         if let Some(ref dns) = self.custom {
             vec![dns.clone()]
-        } else if !self.vpn_servers.is_empty() {
-            self.vpn_servers.clone()
         } else {
-            self.system_servers.clone()
+            vec![STABLE_DEFAULT_DNS.to_string()]
         }
     }
 
@@ -97,12 +107,8 @@ impl DnsConfig {
     pub fn source(&self) -> &'static str {
         if self.custom.is_some() {
             "custom"
-        } else if !self.vpn_servers.is_empty() {
-            "vpn"
-        } else if !self.system_servers.is_empty() {
-            "system"
         } else {
-            "none"
+            "default"
         }
     }
 }

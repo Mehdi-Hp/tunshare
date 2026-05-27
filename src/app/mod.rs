@@ -303,7 +303,10 @@ mod tests {
         app.session = Some(SharingSession::new(
             crate::system::Firewall::new(),
             crate::system::IpForwarding::new(),
-            "utun4".to_string(),
+            crate::session::ActiveUpstream {
+                name: "utun4".to_string(),
+                mtu: 1500,
+            },
             "en0".to_string(),
             Ipv4Addr::new(192, 168, 2, 1),
         ));

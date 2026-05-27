@@ -15,8 +15,8 @@ pub use dns::discover_vpn_dns;
 pub use firewall::Firewall;
 pub use natpmp::NatPmpServer;
 pub use network::{
-    detect_lan_interfaces, detect_vpn_interfaces, read_mtu, same_ipv4_network, set_mtu,
-    InterfaceInfo,
+    default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, read_mtu,
+    same_ipv4_network, set_mtu, InterfaceInfo,
 };
 pub use sysctl::IpForwarding;
 pub use traffic::{read_interface_bytes, InterfaceBytes};

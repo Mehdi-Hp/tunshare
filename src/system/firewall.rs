@@ -91,9 +91,12 @@ anchor "natpmp"
     }
 
     /// Load pf rules from the generated config.
-    pub async fn load_rules(&mut self, vpn_if: &str, lan_if: &str) -> Result<()> {
-        // Generate rules with default MSS (1400 is safe for most VPNs)
-        let rules = Self::generate_rules(vpn_if, lan_if, 1400);
+    ///
+    /// `mss` is the IPv4 TCP MSS clamp for the scrub rule. Caller is
+    /// expected to derive it from the active upstream's MTU
+    /// (`ActiveUpstream::mss_v4()`) so the clamp tracks the tunnel.
+    pub async fn load_rules(&mut self, vpn_if: &str, lan_if: &str, mss: u16) -> Result<()> {
+        let rules = Self::generate_rules(vpn_if, lan_if, mss);
 
         // Write to temp file
         fs::write(&self.config_path, &rules).map_err(TunshareError::Io)?;

@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::doctor::{CheckStatus, CheckSummary};
 use crate::error::Result;
 use crate::health::{HealthStatus, VpnDropStrategy};
-use crate::system::{Firewall, InterfaceInfo, IpForwarding};
+use crate::system::{Firewall, InterfaceInfo, IpForwarding, NatPmpServer};
 
 use super::async_ops::{
     AsyncOpResult, DebugInfo, PendingOp, HEALTH_CHECK_INTERVAL, HEALTH_RECHECK_DEGRADED,
@@ -48,7 +48,10 @@ impl App {
                 ip_forwarding,
             } => self.on_sharing_stopped(result, firewall, ip_forwarding),
             AsyncOpResult::DebugInfoFetched { info } => self.on_debug_info_fetched(info),
-            AsyncOpResult::HealthCheck { status } => self.handle_health_result(status),
+            AsyncOpResult::HealthCheck {
+                status,
+                default_iface,
+            } => self.handle_health_result(status, default_iface),
             AsyncOpResult::TrafficSample { result } => self.handle_traffic_sample(result),
             AsyncOpResult::DoctorFinished { results } => self.on_doctor_finished(results),
             AsyncOpResult::DoctorAnchorFlushed { result } => self.on_doctor_anchor_flushed(result),
@@ -56,6 +59,11 @@ impl App {
                 result,
                 stderr_tail,
             } => self.on_dnsmasq_installed(result, stderr_tail),
+            AsyncOpResult::UpstreamReloaded {
+                result,
+                firewall,
+                natpmp_server,
+            } => self.on_upstream_reloaded(result, firewall, natpmp_server),
         }
     }
 
@@ -85,6 +93,8 @@ impl App {
                     AsyncOpResult::DnsmasqInstalled { .. },
                     Some(PendingOp::InstallingDnsmasq)
                 )
+                // Reload also carries the firewall — always accept.
+                | (AsyncOpResult::UpstreamReloaded { .. }, _)
         )
     }
 
@@ -115,6 +125,8 @@ impl App {
             // stale guard. Return to Menu so the user isn't stuck on a
             // half-cancelled modal.
             PendingOp::InstallingDnsmasq => self.state = AppState::Menu,
+            // Reload runs to completion; result restores firewall ownership.
+            PendingOp::ReloadingUpstream => {}
         }
     }
 
@@ -214,7 +226,7 @@ impl App {
 
     fn on_sharing_started(
         &mut self,
-        result: Result<Option<u16>>,
+        result: Result<(Option<u16>, crate::session::ActiveUpstream)>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     ) {
@@ -230,9 +242,13 @@ impl App {
         }
 
         match result {
-            Ok(original_mtu) => {
+            Ok((original_mtu, upstream)) => {
                 if let Some(ref mut session) = self.session {
                     session.original_mtu = original_mtu;
+                    // Replace the placeholder (MTU=0) with the value the
+                    // spawn detected. All downstream consumers (reactor,
+                    // future rule reloads) now have a real MTU to work with.
+                    session.upstream = upstream;
                 }
                 if let Some(orig) = original_mtu {
                     self.log_info(format!("LAN MTU applied (was <{orig}>, restored on stop)"));
@@ -269,6 +285,51 @@ impl App {
                 self.clear_pending_op();
                 self.state = AppState::Menu;
                 self.session = None;
+            }
+        }
+    }
+
+    /// Restore the firewall + NAT-PMP handle handed back by
+    /// `reload_upstream_async`, swap in the new upstream, and log the
+    /// transition. Errors leave the previous upstream in place — the next
+    /// health probe will retry on the next swap event.
+    fn on_upstream_reloaded(
+        &mut self,
+        result: Result<crate::session::ActiveUpstream>,
+        firewall: Firewall,
+        natpmp_server: Option<NatPmpServer>,
+    ) {
+        if let Some(ref mut session) = self.session {
+            // Replace the placeholder Firewall::default() the dispatcher
+            // stashed with the real one that just loaded the new rules.
+            let (_dummy_fw, ip_forwarding) = session.take_managers();
+            session.restore_managers(firewall, ip_forwarding);
+            session.set_natpmp_server(natpmp_server);
+        }
+        self.clear_pending_op();
+
+        match result {
+            Ok(upstream) => {
+                let old_name = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.upstream.name.clone())
+                    .unwrap_or_default();
+                self.log_success(format!(
+                    "Reloaded rules: <{}> → <{}> (MTU <{}>)",
+                    old_name, upstream.name, upstream.mtu
+                ));
+                if let Some(ref mut session) = self.session {
+                    session.upstream = upstream;
+                    // Recovery from a swap counts as Healthy — the prior
+                    // tick may have marked us Degraded/Down on the dead
+                    // utun; the new probe will confirm.
+                    session.health_status = HealthStatus::Healthy;
+                    session.degraded_since = None;
+                }
+            }
+            Err(e) => {
+                self.log_error(format!("Upstream reload failed: {}", e));
             }
         }
     }
@@ -419,7 +480,29 @@ impl App {
 
     /// Apply a health-check result: log transitions, track Down windows,
     /// reschedule the next check, and auto-stop if the wait window has elapsed.
-    fn handle_health_result(&mut self, status: HealthStatus) {
+    fn handle_health_result(&mut self, status: HealthStatus, default_iface: Option<String>) {
+        // Detect VPN-swap before mutating health state. If the default
+        // route now points at a *different* utun than our session is
+        // bound to, the user switched providers/protocols — kick off a
+        // reload instead of letting the existing utun's Down path fire.
+        // Anything non-`utun*` (or `None`) means the default route fell
+        // off VPN entirely; that's the existing VPN-down case.
+        if let Some(session) = self.session.as_ref() {
+            if let Some(new_iface) = default_iface.as_deref() {
+                if new_iface != session.upstream.name && new_iface.starts_with("utun") {
+                    self.log_info(format!(
+                        "Default route moved to <{new_iface}> (was <{}>) — reloading rules",
+                        session.upstream.name
+                    ));
+                    self.reload_upstream_async(new_iface.to_string());
+                    // Skip the rest of the health bookkeeping for this
+                    // tick: the next probe (after the reload) will see
+                    // the new iface and report cleanly.
+                    return;
+                }
+            }
+        }
+
         let Some(session) = self.session.as_mut() else {
             return;
         };

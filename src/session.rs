@@ -4,8 +4,43 @@ use std::net::Ipv4Addr;
 use std::time::Instant;
 
 use crate::app::traffic::TrafficStats;
+use crate::error::Result;
 use crate::health::HealthStatus;
-use crate::system::{DhcpServer, Firewall, IpForwarding, NatPmpServer};
+use crate::system::{read_mtu, DhcpServer, Firewall, IpForwarding, NatPmpServer};
+
+/// IPv4 TCP/IP header overhead used to clamp MSS from MTU in the pf scrub rule.
+const IPV4_TCP_HEADER_OVERHEAD: u16 = 40;
+
+/// Floor on the computed MSS so a pathological `read_mtu` reading can't
+/// emit a nonsense scrub rule. 216 = 256 (min reasonable v4 MTU) - 40.
+const MIN_SAFE_MSS: u16 = 216;
+
+/// The VPN tunnel currently carrying LAN traffic.
+///
+/// Single source of truth for the upstream's name + MTU. Every consumer
+/// (pf nat rule, pf scrub `max-mss`, `ifconfig <lan> mtu`, NAT-PMP bind,
+/// health probe, traffic sampler) reads from one of these — no more
+/// independent `read_mtu` calls scattered around.
+#[derive(Debug, Clone)]
+pub struct ActiveUpstream {
+    pub name: String,
+    pub mtu: u16,
+}
+
+impl ActiveUpstream {
+    /// Build an `ActiveUpstream` by reading the iface's current MTU.
+    pub async fn detect(name: String) -> Result<Self> {
+        let mtu = read_mtu(&name).await?;
+        Ok(Self { name, mtu })
+    }
+
+    /// MSS clamp for IPv4 pf scrub rules. `mtu - 40`, floored.
+    pub fn mss_v4(&self) -> u16 {
+        self.mtu
+            .saturating_sub(IPV4_TCP_HEADER_OVERHEAD)
+            .max(MIN_SAFE_MSS)
+    }
+}
 
 /// Synchronously restore a LAN interface's MTU. Used by Drop where we can't
 /// await — relies on `ifconfig` being fast (< 100ms in practice).
@@ -28,8 +63,9 @@ pub struct SharingSession {
     firewall: Option<Firewall>,
     ip_forwarding: Option<IpForwarding>,
 
-    /// VPN interface name (e.g. "utun4").
-    pub vpn_name: String,
+    /// The active VPN upstream (name + MTU). Mutated by the route-change
+    /// reactor when the user swaps VPN providers/protocols mid-session.
+    pub upstream: ActiveUpstream,
     /// LAN interface name (e.g. "en0").
     pub lan_name: String,
     /// LAN gateway IP (e.g. 192.168.2.1).
@@ -61,14 +97,14 @@ impl SharingSession {
     pub fn new(
         firewall: Firewall,
         ip_forwarding: IpForwarding,
-        vpn_name: String,
+        upstream: ActiveUpstream,
         lan_name: String,
         lan_ip: Ipv4Addr,
     ) -> Self {
         Self {
             firewall: Some(firewall),
             ip_forwarding: Some(ip_forwarding),
-            vpn_name,
+            upstream,
             lan_name,
             lan_ip,
             dhcp_active: false,
@@ -148,5 +184,35 @@ impl Drop for SharingSession {
         if let Some(mtu) = self.original_mtu {
             restore_mtu_sync(&self.lan_name, mtu);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mss_v4_subtracts_ipv4_overhead() {
+        let u = ActiveUpstream {
+            name: "utun10".into(),
+            mtu: 1500,
+        };
+        assert_eq!(u.mss_v4(), 1460);
+
+        let u = ActiveUpstream {
+            name: "utun11".into(),
+            mtu: 1380,
+        };
+        assert_eq!(u.mss_v4(), 1340);
+    }
+
+    #[test]
+    fn mss_v4_clamps_to_floor() {
+        // Pathological MTU values shouldn't emit a sub-216 MSS rule.
+        let u = ActiveUpstream {
+            name: "broken".into(),
+            mtu: 0,
+        };
+        assert_eq!(u.mss_v4(), 216);
     }
 }

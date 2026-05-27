@@ -24,6 +24,7 @@ use super::App;
 
 /// Per-operation timeouts. Tuned to "long enough that a healthy machine
 /// always wins, short enough that a hung syscall doesn't strand the UI."
+pub(super) const TIMEOUT_RELOAD_UPSTREAM: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_INTERFACES: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_DNS: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_START_SHARING: Duration = Duration::from_secs(10);
@@ -74,8 +75,10 @@ pub enum AsyncOpResult {
     },
     SharingStarted {
         /// On success: the original LAN MTU we snapshotted before applying a
-        /// new one (`None` when the policy was `Auto` so nothing changed).
-        result: Result<Option<u16>>,
+        /// new one (`None` when the policy was `Auto` so nothing changed),
+        /// plus the upstream we detected so the session can adopt its real
+        /// MTU (the session was constructed with a placeholder MTU=0).
+        result: Result<(Option<u16>, crate::session::ActiveUpstream)>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     },
@@ -94,8 +97,24 @@ pub enum AsyncOpResult {
     DebugInfoFetched {
         info: Result<DebugInfo>,
     },
+    /// Rule reload after a VPN swap (default route moved to a new utun).
+    /// On success: the new upstream (name + freshly-read MTU) so the
+    /// session can adopt it. Firewall comes back so Drop cleans up.
+    /// `natpmp_server` is the replacement handle if NAT-PMP was active
+    /// before the reload (caller had stopped the old one).
+    UpstreamReloaded {
+        result: Result<crate::session::ActiveUpstream>,
+        firewall: Firewall,
+        natpmp_server: Option<NatPmpServer>,
+    },
     HealthCheck {
         status: HealthStatus,
+        /// Iface name on the current IPv4 default route, if any. Used by
+        /// the result handler to detect VPN swaps (utunN → utunM) and
+        /// dispatch `reload_upstream_async`. `None` when there's no
+        /// default route or `route(8)` failed; both are treated as
+        /// "don't reload" — the existing VPN-down path takes over.
+        default_iface: Option<String>,
     },
     /// Periodic byte-counter sample for the VPN interface. `Err` is treated
     /// as a transient blip — we just skip the sample.
@@ -130,6 +149,7 @@ pub enum PendingOp {
     RunningDoctor,
     FlushingStaleAnchor,
     InstallingDnsmasq,
+    ReloadingUpstream,
 }
 
 impl PendingOp {
@@ -145,6 +165,7 @@ impl PendingOp {
             PendingOp::RunningDoctor => "Running diagnostic checks...",
             PendingOp::FlushingStaleAnchor => "Flushing stale pf anchor...",
             PendingOp::InstallingDnsmasq => "Installing dnsmasq via Homebrew...",
+            PendingOp::ReloadingUpstream => "Reloading rules for new VPN interface...",
         }
     }
 }
@@ -261,10 +282,17 @@ impl App {
         self.set_pending_op(PendingOp::StartingSharing);
 
         let lan_ip = lan_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
+        // Placeholder MTU — the spawn detects the real value via
+        // `ActiveUpstream::detect` and emits it on `SharingStarted` so the
+        // session's upstream gets filled in once rules are loaded. Until
+        // then nothing reads `upstream.mtu` (the spawn computes its own).
         let mut session = crate::session::SharingSession::new(
             Firewall::new(),
             IpForwarding::new(),
-            vpn_name.clone(),
+            crate::session::ActiveUpstream {
+                name: vpn_name.clone(),
+                mtu: 0,
+            },
             lan_name.clone(),
             lan_ip,
         );
@@ -281,12 +309,28 @@ impl App {
             let result = timeout(TIMEOUT_START_SHARING, async {
                 ip_forwarding.enable().await?;
 
-                if let Err(e) = firewall.load_rules(&vpn_name, &lan_name).await {
+                // Detect the upstream's MTU first so the pf scrub `max-mss`
+                // tracks the tunnel and we have a concrete value to seed
+                // `session.upstream.mtu` with on success.
+                let upstream = match crate::session::ActiveUpstream::detect(vpn_name.clone()).await
+                {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let _ = ip_forwarding.restore().await;
+                        return Err(e);
+                    }
+                };
+
+                if let Err(e) = firewall
+                    .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
+                    .await
+                {
                     let _ = ip_forwarding.restore().await;
                     return Err(e);
                 }
 
-                let original_mtu = match apply_lan_mtu(&vpn_name, &lan_name, mtu_policy).await {
+                let original_mtu = match apply_lan_mtu(&upstream.name, &lan_name, mtu_policy).await
+                {
                     Ok(opt) => opt,
                     Err(e) => {
                         // MTU step failed — roll back firewall + ip_forwarding
@@ -297,7 +341,7 @@ impl App {
                     }
                 };
 
-                Ok(original_mtu)
+                Ok((original_mtu, upstream))
             })
             .await;
 
@@ -512,14 +556,134 @@ impl App {
         };
 
         let tx = self.op_tx.clone();
-        let vpn_name = session.vpn_name.clone();
+        let vpn_name = session.upstream.name.clone();
         self.next_health_check = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
 
         tokio::spawn(async move {
-            let status = timeout(TIMEOUT_HEALTH_CHECK, health::check_health(&vpn_name))
-                .await
-                .unwrap_or(HealthStatus::Healthy); // Timeout = assume OK
-            let _ = tx.send(AsyncOpResult::HealthCheck { status });
+            let probe = timeout(TIMEOUT_HEALTH_CHECK, async {
+                let (status, default_iface) = tokio::join!(
+                    health::check_health(&vpn_name),
+                    crate::system::default_route_interface(),
+                );
+                (status, default_iface.ok().flatten())
+            })
+            .await;
+            let (status, default_iface) = probe.unwrap_or((HealthStatus::Healthy, None)); // Timeout = assume OK
+            let _ = tx.send(AsyncOpResult::HealthCheck {
+                status,
+                default_iface,
+            });
+        });
+    }
+
+    /// React to a default-route change: rebuild pf rules + LAN MTU
+    /// against the new upstream utun, atomically replacing the old set.
+    /// NAT-PMP (if active) is torn down here and restarted with the new
+    /// external iface so port mappings advertise the right external IP.
+    ///
+    /// Bails early if anything else is in flight — the next health probe
+    /// will see the new iface again and re-dispatch.
+    pub(super) fn reload_upstream_async(&mut self, new_name: String) {
+        if self.pending_op.is_some() || self.session.is_none() {
+            return;
+        }
+        self.set_pending_op(PendingOp::ReloadingUpstream);
+
+        let mtu_policy = self.mtu.active;
+        // Re-fire DNS discovery for visibility (debug panel). Doesn't
+        // touch `pending_op` — fire-and-forget so the reload owns the op.
+        self.discover_dns_async_fire_and_forget(new_name.clone());
+
+        // Borrow session mutably to grab the firewall + snapshot fields.
+        let session = self.session.as_mut().expect("checked above");
+        let (mut firewall, ip_forwarding) = session.take_managers();
+        // Hand IP forwarding straight back — the swap doesn't touch it.
+        // The firewall stays out for the duration of the reload spawn.
+        session.restore_managers(Firewall::default(), ip_forwarding);
+        let lan_name = session.lan_name.clone();
+        let lan_ip = session.lan_ip;
+        let natpmp_was_active = session.natpmp_active;
+        if natpmp_was_active {
+            // Stop the old server now so the spawn can spin up a fresh
+            // one bound to the new ext iface.
+            session.shutdown_natpmp();
+        }
+
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let outcome = timeout(TIMEOUT_RELOAD_UPSTREAM, async {
+                let upstream = crate::session::ActiveUpstream::detect(new_name).await?;
+                firewall
+                    .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
+                    .await?;
+                // Re-apply LAN MTU against the new upstream. Discard the
+                // returned snapshot — `session.original_mtu` already holds
+                // the *true* baseline from session start; overwriting it
+                // would lose the restore target on Drop.
+                let _ = apply_lan_mtu(&upstream.name, &lan_name, mtu_policy).await?;
+                Ok::<_, TunshareError>(upstream)
+            })
+            .await;
+
+            let (result, new_upstream_name) = match outcome {
+                Ok(Ok(u)) => {
+                    let n = u.name.clone();
+                    (Ok(u), Some(n))
+                }
+                Ok(Err(e)) => (Err(e), None),
+                Err(_) => (
+                    Err(TunshareError::FirewallError(
+                        "upstream reload timed out".into(),
+                    )),
+                    None,
+                ),
+            };
+
+            // Restart NAT-PMP against the new upstream if it was active.
+            // Failure here doesn't fail the reload — log and continue.
+            let natpmp_server = if natpmp_was_active {
+                if let Some(name) = new_upstream_name.as_deref() {
+                    let lan_network = NatPmpServer::network_from_ip(lan_ip);
+                    let server = NatPmpServer::new(name, &lan_name, &lan_network);
+                    if server.start().await.is_ok() {
+                        Some(server)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let _ = tx.send(AsyncOpResult::UpstreamReloaded {
+                result,
+                firewall,
+                natpmp_server,
+            });
+        });
+    }
+
+    /// Fire-and-forget DNS discovery. Used by the upstream reactor — we
+    /// want fresh `vpn_servers` for visibility but don't want to gate the
+    /// reload on it (and don't want to touch `pending_op`, which is
+    /// already held by the reload).
+    fn discover_dns_async_fire_and_forget(&self, vpn_name: String) {
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = timeout(TIMEOUT_DNS, async {
+                tokio::join!(discover_vpn_dns(&vpn_name), get_default_dns())
+            })
+            .await;
+            let (vpn_servers, system_servers) = match result {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let _ = tx.send(AsyncOpResult::DnsDiscovered {
+                vpn_servers,
+                system_servers,
+            });
         });
     }
 
@@ -531,7 +695,7 @@ impl App {
         };
 
         let tx = self.op_tx.clone();
-        let vpn_name = session.vpn_name.clone();
+        let vpn_name = session.upstream.name.clone();
         self.next_traffic_sample = Some(Instant::now() + super::traffic::SAMPLE_INTERVAL);
 
         tokio::spawn(async move {
@@ -667,7 +831,7 @@ impl App {
     pub(super) fn maybe_start_natpmp(&mut self) -> bool {
         if self.natpmp_enabled {
             if let Some(session) = self.session.as_ref() {
-                let vpn_name = session.vpn_name.clone();
+                let vpn_name = session.upstream.name.clone();
                 let lan_name = session.lan_name.clone();
                 let lan_ip = session.lan_ip;
                 self.start_natpmp_async(vpn_name, lan_name, lan_ip);
