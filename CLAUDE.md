@@ -16,6 +16,7 @@ just test    # Run tests
 just fmt     # Format code
 just check   # Full pre-commit: fmt-check, lint, test, build
 just clean   # Clean build artifacts
+just push-to-server # Builds and pushes the binary to home server
 ```
 
 Release builds are produced by CI for distribution. For ad-hoc optimized testing, run `cargo build --release` directly.

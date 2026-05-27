@@ -1,5 +1,9 @@
 # tunshare task runner. Run `just` with no args to see all recipes.
 
+# Optional local recipes (gitignored). Use for personal workflows like
+# pushing builds to a specific host — anything that shouldn't be committed.
+import? 'justfile.local'
+
 # Show the recipe list.
 default:
     @just --list
@@ -50,7 +54,7 @@ clean:
 ship kind:
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{kind}}" in
+    case "{{ kind }}" in
       major|minor|patch) ;;
       *) echo "usage: just ship <major|minor|patch>" >&2; exit 2 ;;
     esac
@@ -60,13 +64,13 @@ ship kind:
       | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
     latest="${latest:-v0.0.0}"
     IFS=. read -r major minor patch <<< "${latest#v}"
-    case "{{kind}}" in
+    case "{{ kind }}" in
       major) major=$((major+1)); minor=0; patch=0 ;;
       minor) minor=$((minor+1)); patch=0 ;;
       patch) patch=$((patch+1)) ;;
     esac
     next="${major}.${minor}.${patch}"
-    echo "==> bumping {{kind}}: ${latest} → v${next}"
+    echo "==> bumping {{ kind }}: ${latest} → v${next}"
     echo
     ./scripts/release.sh --version "${next}" --confirm
     open https://github.com/kumamaki/tunshare/actions
