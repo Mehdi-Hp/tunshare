@@ -338,6 +338,8 @@ impl App {
         self.session = None;
         self.next_health_check = None;
         self.next_traffic_sample = None;
+        self.dns.vpn_servers.clear();
+        self.dns.system_servers.clear();
         self.state = AppState::Menu;
         self.selected_menu_item = 0;
         self.show_debug = false;
