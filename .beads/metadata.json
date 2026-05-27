@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tunshare",
+  "project_id": "df1b2eab-ccb8-45c7-8cb2-37afa00ce0d7"
+}
