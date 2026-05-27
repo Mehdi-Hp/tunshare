@@ -102,8 +102,13 @@ if [[ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]]; then
     exit 1
   fi
   AHEAD="$(git rev-list --count "$REMOTE/main"..HEAD)"
-  echo "release.sh: local main is $AHEAD commit(s) ahead of $REMOTE/main — push or reset first" >&2
-  exit 1
+  echo "release.sh: local main is $AHEAD commit(s) ahead of $REMOTE/main — pushing to $REMOTE/main..."
+  git push "$REMOTE" main
+  REMOTE_HEAD="$(git rev-parse "$REMOTE/main")"
+  if [[ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]]; then
+    echo "release.sh: push completed but $REMOTE/main still doesn't match HEAD — bailing" >&2
+    exit 1
+  fi
 fi
 
 if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
