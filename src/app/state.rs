@@ -12,6 +12,7 @@ pub enum AppState {
     SelectingLan,
     Active,
     EditingDns,
+    EditingMtu,
     Doctor,
     /// Modal asking the user to install dnsmasq via Homebrew.
     InstallDnsmasq,
@@ -29,6 +30,7 @@ pub enum MenuItem {
     ToggleDhcp,
     ToggleNatPmp,
     SetDns,
+    SetMtu,
     RunDoctor,
     Quit,
 }
@@ -54,6 +56,7 @@ impl App {
                 MenuItem::ToggleDhcp,
                 MenuItem::ToggleNatPmp,
                 MenuItem::SetDns,
+                MenuItem::SetMtu,
                 MenuItem::RunDoctor,
                 MenuItem::Quit,
             ]

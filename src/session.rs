@@ -6,6 +6,14 @@ use std::time::Instant;
 use crate::health::HealthStatus;
 use crate::system::{DhcpServer, Firewall, IpForwarding, NatPmpServer};
 
+/// Synchronously restore a LAN interface's MTU. Used by Drop where we can't
+/// await — relies on `ifconfig` being fast (< 100ms in practice).
+fn restore_mtu_sync(iface: &str, mtu: u16) {
+    let _ = std::process::Command::new("ifconfig")
+        .args([iface, "mtu", &mtu.to_string()])
+        .output();
+}
+
 /// Represents an active VPN sharing session.
 ///
 /// Created when sharing starts, dropped when sharing stops (or on panic).
@@ -34,6 +42,9 @@ pub struct SharingSession {
     pub natpmp_active: bool,
     /// Handle to the running NAT-PMP server (for shutdown signaling).
     natpmp_server: Option<NatPmpServer>,
+    /// Original LAN MTU captured before we changed it. Restored on Drop.
+    /// `None` means we never modified the MTU (skip restore).
+    pub original_mtu: Option<u16>,
     /// Connection health status (updated by periodic checks).
     pub health_status: HealthStatus,
     /// When the VPN was first observed Down (None when healthy).
@@ -60,6 +71,7 @@ impl SharingSession {
             dhcp_range: None,
             natpmp_active: false,
             natpmp_server: None,
+            original_mtu: None,
             health_status: HealthStatus::default(),
             degraded_since: None,
         }
@@ -125,6 +137,11 @@ impl Drop for SharingSession {
         // IP forwarding (only if we still own it)
         if let Some(ref mut fwd) = self.ip_forwarding {
             fwd.restore_sync();
+        }
+
+        // MTU last — cosmetic, can't break cleanup ordering if it fails.
+        if let Some(mtu) = self.original_mtu {
+            restore_mtu_sync(&self.lan_name, mtu);
         }
     }
 }

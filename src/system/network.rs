@@ -1,6 +1,6 @@
 //! Network interface detection for VPN and LAN interfaces.
 
-use crate::error::Result;
+use crate::error::{Result, TunshareError};
 use crate::system::run_cmd;
 use std::net::Ipv4Addr;
 
@@ -101,6 +101,48 @@ fn is_wifi_port(description: Option<&str>) -> bool {
         }
         None => false,
     }
+}
+
+/// Read the MTU of `iface` by parsing `ifconfig <iface>` output.
+///
+/// The header line of `ifconfig <iface>` always carries `mtu <N>` as its
+/// trailing token on macOS, e.g. `en0: flags=...<UP,...> mtu 1500`.
+pub async fn read_mtu(iface: &str) -> Result<u16> {
+    let output = run_cmd("ifconfig", &[iface]).await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_mtu(&stdout)
+        .ok_or_else(|| TunshareError::ParseError(format!("no MTU line for interface <{iface}>")))
+}
+
+/// Set the MTU of `iface` to `mtu` via `ifconfig <iface> mtu <mtu>`.
+/// Requires root.
+pub async fn set_mtu(iface: &str, mtu: u16) -> Result<()> {
+    let mtu_str = mtu.to_string();
+    let output = run_cmd("ifconfig", &[iface, "mtu", &mtu_str]).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TunshareError::CommandFailed {
+            command: format!("ifconfig {iface} mtu {mtu}"),
+            message: stderr.trim().to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Extract the MTU from the first interface header line in ifconfig output.
+fn parse_mtu(output: &str) -> Option<u16> {
+    for line in output.lines() {
+        if line.starts_with('\t') || line.starts_with(' ') {
+            continue;
+        }
+        let mut tokens = line.split_whitespace();
+        while let Some(tok) = tokens.next() {
+            if tok == "mtu" {
+                return tokens.next().and_then(|n| n.parse::<u16>().ok());
+            }
+        }
+    }
+    None
 }
 
 /// Parse an ifconfig hex netmask like `0xffffff00` into an `Ipv4Addr`.
@@ -244,6 +286,17 @@ utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
         let a = iface("en0", [192, 168, 1, 10], [255, 255, 255, 0]);
         let b = iface("en1", [192, 168, 2, 10], [255, 255, 255, 0]);
         assert!(!same_ipv4_network(&a, &b));
+    }
+
+    #[test]
+    fn parse_mtu_reads_header_line() {
+        let output = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tether 00:11:22:33:44:55\n\tinet 192.168.2.1 netmask 0xffffff00 broadcast 192.168.2.255\n";
+        assert_eq!(parse_mtu(output), Some(1500));
+
+        let utun = "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1400\n\tinet 10.8.0.6 --> 10.8.0.5 netmask 0xffffffff\n";
+        assert_eq!(parse_mtu(utun), Some(1400));
+
+        assert_eq!(parse_mtu("no interface here\n"), None);
     }
 
     #[test]

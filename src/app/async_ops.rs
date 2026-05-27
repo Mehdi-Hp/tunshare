@@ -8,12 +8,14 @@ use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
 
+use crate::config::LanMtu;
 use crate::doctor::{self, CheckResult};
 use crate::error::{Result, TunshareError};
 use crate::health::{self, HealthStatus};
 use crate::system::{
     brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns,
-    dns::get_default_dns, DhcpServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer,
+    dns::get_default_dns, read_mtu, set_mtu, DhcpServer, Firewall, InterfaceInfo, IpForwarding,
+    NatPmpServer,
 };
 
 use super::App;
@@ -70,7 +72,9 @@ pub enum AsyncOpResult {
         system_servers: Result<Vec<String>>,
     },
     SharingStarted {
-        result: Result<()>,
+        /// On success: the original LAN MTU we snapshotted before applying a
+        /// new one (`None` when the policy was `Auto` so nothing changed).
+        result: Result<Option<u16>>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     },
@@ -147,6 +151,26 @@ fn timeout_err(command: &str) -> TunshareError {
         command: command.into(),
         message: "operation timed out".into(),
     }
+}
+
+// ===== MTU policy resolution =====
+
+/// Resolve the user's LAN MTU policy and apply it. Returns `Some(original)`
+/// when we changed the MTU (so caller can store it for restore), or `None`
+/// when the policy was `Auto` or the resolved value already matched the
+/// current MTU (nothing to undo).
+async fn apply_lan_mtu(vpn_name: &str, lan_name: &str, policy: LanMtu) -> Result<Option<u16>> {
+    let target = match policy {
+        LanMtu::Auto => return Ok(None),
+        LanMtu::Fixed(n) => n,
+        LanMtu::MatchVpn => read_mtu(vpn_name).await?,
+    };
+    let current = read_mtu(lan_name).await?;
+    if current == target {
+        return Ok(None);
+    }
+    set_mtu(lan_name, target).await?;
+    Ok(Some(current))
 }
 
 // ===== Spawners =====
@@ -245,6 +269,7 @@ impl App {
         let (mut firewall, mut ip_forwarding) = session.take_managers();
         self.session = Some(session);
 
+        let mtu_policy = self.mtu.active;
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
             let result = timeout(TIMEOUT_START_SHARING, async {
@@ -255,7 +280,18 @@ impl App {
                     return Err(e);
                 }
 
-                Ok(())
+                let original_mtu = match apply_lan_mtu(&vpn_name, &lan_name, mtu_policy).await {
+                    Ok(opt) => opt,
+                    Err(e) => {
+                        // MTU step failed — roll back firewall + ip_forwarding
+                        // so the box doesn't end up half-configured.
+                        let _ = firewall.cleanup().await;
+                        let _ = ip_forwarding.restore().await;
+                        return Err(e);
+                    }
+                };
+
+                Ok(original_mtu)
             })
             .await;
 

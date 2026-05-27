@@ -17,6 +17,7 @@ mod async_ops;
 mod dns;
 mod input;
 mod log;
+pub mod mtu;
 mod result;
 mod state;
 
@@ -33,6 +34,7 @@ use crate::system::{DhcpServer, InterfaceInfo};
 pub use async_ops::{AsyncOpResult, DebugInfo, PendingOp};
 pub use dns::{DnsConfig, DnsEditMode, DNS_PRESETS};
 pub use log::LogEntry;
+pub use mtu::MtuConfig;
 pub use state::{AppState, DoctorState, MenuItem};
 
 /// Application state.
@@ -40,6 +42,7 @@ pub struct App {
     pub vpn_interfaces: Vec<InterfaceInfo>,
     pub lan_interfaces: Vec<InterfaceInfo>,
     pub dns: DnsConfig,
+    pub mtu: MtuConfig,
     pub selected_vpn: Option<usize>,
     pub selected_lan: Option<usize>,
     pub session: Option<SharingSession>,
@@ -88,6 +91,7 @@ impl App {
             vpn_interfaces: Vec::new(),
             lan_interfaces: Vec::new(),
             dns: DnsConfig::new(config.custom_dns, config.dns_history),
+            mtu: MtuConfig::new(config.lan_mtu),
             selected_vpn: None,
             selected_lan: None,
             session: None,
@@ -228,6 +232,10 @@ impl App {
                 DnsEditMode::SelectingPreset => "↑/↓: Navigate  Enter: Select  Esc: Cancel",
                 DnsEditMode::CustomInput => "Enter: Save  Esc: Back  (empty = auto-detect)",
             },
+            AppState::EditingMtu => match self.mtu.edit_mode {
+                mtu::MtuEditMode::SelectingPreset => "↑/↓: Navigate  Enter: Select  Esc: Cancel",
+                mtu::MtuEditMode::CustomInput => "Enter: Save  Esc: Back  (576–9000 bytes)",
+            },
         }
     }
 
@@ -241,6 +249,7 @@ impl App {
             custom_dns: self.dns.custom.clone(),
             dns_history: self.dns.history.clone(),
             vpn_drop_strategy: self.vpn_drop_strategy,
+            lan_mtu: self.mtu.active,
         }
         .save();
     }

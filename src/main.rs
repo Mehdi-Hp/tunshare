@@ -33,7 +33,8 @@ use ui::{
     debug::render_debug_panel,
     interface_select::{render_lan_selection, render_vpn_selection},
     main_menu::{
-        render_connection_info, render_dns_edit, render_header, render_main_menu, render_separator,
+        render_connection_info, render_dns_edit, render_header, render_main_menu, render_mtu_edit,
+        render_separator,
     },
     status::{render_help, render_loading_indicator, render_status_panel},
 };
@@ -230,6 +231,10 @@ async fn run_app() -> Result<()> {
                 AppState::EditingDns => {
                     render_main_menu(frame, chunks[2], &app);
                     render_dns_edit(frame, chunks[2], &app);
+                }
+                AppState::EditingMtu => {
+                    render_main_menu(frame, chunks[2], &app);
+                    render_mtu_edit(frame, chunks[2], &app);
                 }
                 AppState::InstallDnsmasq => {
                     render_main_menu(frame, chunks[2], &app);

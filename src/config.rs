@@ -13,6 +13,27 @@ use crate::health::VpnDropStrategy;
 /// Maximum number of remembered custom DNS entries.
 pub const DNS_HISTORY_MAX: usize = 10;
 
+/// Minimum acceptable MTU. IPv4 RFC 791 floor; smaller values break PMTUD
+/// and most stacks reject them outright.
+pub const MTU_MIN: u16 = 576;
+/// Maximum acceptable MTU. Jumbo-frame upper bound; macOS `ifconfig` rejects
+/// larger values on most interface types.
+pub const MTU_MAX: u16 = 9000;
+
+/// LAN-interface MTU policy.
+///
+/// `Auto` leaves the interface alone (default). `MatchVpn` reads the VPN's
+/// current MTU at session start and applies it to the LAN, tracking the tunnel
+/// automatically. `Fixed(n)` pins an explicit value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(tag = "mode", content = "value", rename_all = "snake_case")]
+pub enum LanMtu {
+    #[default]
+    Auto,
+    MatchVpn,
+    Fixed(u16),
+}
+
 /// Persisted user preferences.
 ///
 /// Every field has a serde default so that adding new fields later
@@ -42,6 +63,11 @@ pub struct Config {
     /// What to do when the VPN interface drops mid-session.
     #[serde(default)]
     pub vpn_drop_strategy: VpnDropStrategy,
+
+    /// LAN-interface MTU policy. Applied when sharing starts; original is
+    /// restored on stop. See [`LanMtu`].
+    #[serde(default)]
+    pub lan_mtu: LanMtu,
 }
 
 fn default_true() -> bool {
@@ -56,6 +82,7 @@ impl Default for Config {
             custom_dns: None,
             dns_history: Vec::new(),
             vpn_drop_strategy: VpnDropStrategy::default(),
+            lan_mtu: LanMtu::default(),
         }
     }
 }

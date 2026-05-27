@@ -209,7 +209,7 @@ impl App {
 
     fn on_sharing_started(
         &mut self,
-        result: Result<()>,
+        result: Result<Option<u16>>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     ) {
@@ -225,7 +225,13 @@ impl App {
         }
 
         match result {
-            Ok(()) => {
+            Ok(original_mtu) => {
+                if let Some(ref mut session) = self.session {
+                    session.original_mtu = original_mtu;
+                }
+                if let Some(orig) = original_mtu {
+                    self.log_info(format!("LAN MTU applied (was <{orig}>, restored on stop)"));
+                }
                 let lan_ip_display = self
                     .session
                     .as_ref()

@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::app::mtu::{MtuEditMode, Preset as MtuPreset, PRESETS as MTU_PRESETS};
 use crate::app::{App, AppState, DnsEditMode, MenuItem, DNS_PRESETS};
 use crate::health::HealthStatus;
 use crate::ui::theme::{borders, colors, styles, symbols};
@@ -38,7 +39,10 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         let text = match app.state {
-            AppState::SelectingVpn | AppState::SelectingLan | AppState::EditingDns => "Configuring",
+            AppState::SelectingVpn
+            | AppState::SelectingLan
+            | AppState::EditingDns
+            | AppState::EditingMtu => "Configuring",
             _ => "Inactive",
         };
         (
@@ -99,6 +103,7 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
             MenuItem::ToggleDhcp
             | MenuItem::ToggleNatPmp
             | MenuItem::SetDns
+            | MenuItem::SetMtu
             | MenuItem::RunDoctor => group_settings.push((i, item)),
             MenuItem::Quit => group_quit.push((i, item)),
         }
@@ -311,6 +316,14 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
                 "Auto-detect uses your VPN's DNS.",
             ],
         ),
+        MenuItem::SetMtu => (
+            "LAN MTU",
+            vec![
+                "Pin the LAN interface MTU. Match VPN",
+                "tracks the tunnel; Auto leaves it alone.",
+                "Restored on stop.",
+            ],
+        ),
         MenuItem::RunDoctor => (
             "Run Doctor",
             vec![
@@ -428,6 +441,7 @@ fn menu_item_label_str(item: &MenuItem) -> &'static str {
         MenuItem::ToggleDhcp => "DHCP Server",
         MenuItem::ToggleNatPmp => "NAT-PMP Server",
         MenuItem::SetDns => "DNS Server",
+        MenuItem::SetMtu => "LAN MTU",
         MenuItem::RunDoctor => "Run Doctor",
         MenuItem::Quit => "Quit",
     }
@@ -471,6 +485,10 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             };
             ("DNS Server".to_string(), Some(StatusBadge::Value(value)))
         }
+        MenuItem::SetMtu => (
+            "LAN MTU".to_string(),
+            Some(StatusBadge::Value(app.mtu.active_label())),
+        ),
         MenuItem::RunDoctor => ("Run Doctor".to_string(), None),
         MenuItem::Quit => ("Quit".to_string(), None),
     }
@@ -682,6 +700,122 @@ fn render_dns_custom_input(frame: &mut Frame, area: Rect, app: &App) {
     let input_display = format!("{}█", app.dns.input_buffer);
     let input_line = Line::from(vec![
         Span::styled("DNS: ", Style::default().fg(colors::TEXT_SECONDARY)),
+        Span::styled(
+            input_display,
+            Style::default()
+                .fg(colors::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let input_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    frame.render_widget(Paragraph::new(input_line), input_area);
+}
+
+/// Render the MTU editing overlay (dispatches by mode).
+pub fn render_mtu_edit(frame: &mut Frame, area: Rect, app: &App) {
+    match app.mtu.edit_mode {
+        MtuEditMode::SelectingPreset => render_mtu_preset_list(frame, area, app),
+        MtuEditMode::CustomInput => render_mtu_custom_input(frame, area, app),
+    }
+}
+
+fn render_mtu_preset_list(frame: &mut Frame, area: Rect, app: &App) {
+    let card_width = 48u16.min(area.width.saturating_sub(4));
+    let row_count = MTU_PRESETS.len() as u16;
+    let card_height = (row_count + 4).min(area.height.saturating_sub(2));
+    let card_x = area.x + (area.width.saturating_sub(card_width)) / 2;
+    let card_y = area.y + (area.height.saturating_sub(card_height)) / 2;
+    let card_area = Rect::new(card_x, card_y, card_width, card_height);
+
+    frame.render_widget(Clear, area);
+    let card = Card::new(Span::styled(" Set LAN MTU ", styles::card_title())).focused(true);
+    frame.render_widget(card, card_area);
+
+    let inner = Rect::new(
+        card_area.x + 2,
+        card_area.y + 1,
+        card_area.width.saturating_sub(4),
+        card_area.height.saturating_sub(2),
+    );
+
+    // Current value summary.
+    let current_text = format!("Current: {}", app.mtu.active_label());
+    let current_line = Line::from(Span::styled(
+        current_text,
+        Style::default().fg(colors::TEXT_SECONDARY),
+    ));
+    let current_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(Paragraph::new(current_line), current_area);
+
+    let items_y = inner.y + 2;
+    let sel = app.mtu.preset_selected;
+    for (i, preset) in MTU_PRESETS.iter().enumerate() {
+        let y = items_y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let is_selected = sel == i;
+        let style = if is_selected {
+            styles::selected()
+        } else {
+            styles::unselected()
+        };
+        let prefix = if is_selected {
+            format!("  {}  ", symbols::SELECTED)
+        } else {
+            "     ".to_string()
+        };
+        let (label, hint) = match preset {
+            MtuPreset::Auto => ("Auto (don't change)".to_string(), String::new()),
+            MtuPreset::MatchVpn => ("Match VPN".to_string(), "resolves at start".to_string()),
+            MtuPreset::Fixed(n, kind) => (format!("{n}"), (*kind).to_string()),
+            MtuPreset::Custom => ("Custom...".to_string(), String::new()),
+        };
+        let hint_style = if is_selected {
+            style
+        } else {
+            Style::default().fg(colors::TEXT_SECONDARY)
+        };
+        let mut spans = vec![
+            Span::styled(prefix, style),
+            Span::styled(format!("{:<22}", label), style),
+        ];
+        if !hint.is_empty() {
+            spans.push(Span::styled(hint, hint_style));
+        }
+        let item_area = Rect::new(inner.x, y, inner.width, 1);
+        frame.render_widget(Paragraph::new(Line::from(spans)), item_area);
+    }
+}
+
+fn render_mtu_custom_input(frame: &mut Frame, area: Rect, app: &App) {
+    let card_width = 44u16.min(area.width.saturating_sub(4));
+    let card_height = 5u16;
+    let card_x = area.x + (area.width.saturating_sub(card_width)) / 2;
+    let card_y = area.y + (area.height.saturating_sub(card_height)) / 2;
+    let card_area = Rect::new(card_x, card_y, card_width, card_height);
+
+    frame.render_widget(Clear, area);
+    let card = Card::new(Span::styled(" Custom LAN MTU ", styles::card_title())).focused(true);
+    frame.render_widget(card, card_area);
+
+    let inner = Rect::new(
+        card_area.x + 2,
+        card_area.y + 1,
+        card_area.width.saturating_sub(4),
+        card_area.height.saturating_sub(2),
+    );
+
+    let hint = Line::from(Span::styled(
+        "Bytes (576 – 9000)",
+        Style::default().fg(colors::TEXT_SECONDARY),
+    ));
+    let hint_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(Paragraph::new(hint), hint_area);
+
+    let input_display = format!("{}█", app.mtu.input_buffer);
+    let input_line = Line::from(vec![
+        Span::styled("MTU: ", Style::default().fg(colors::TEXT_SECONDARY)),
         Span::styled(
             input_display,
             Style::default()

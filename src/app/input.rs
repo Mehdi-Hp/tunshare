@@ -8,7 +8,10 @@ use std::net::IpAddr;
 
 use crossterm::event::KeyCode;
 
+use crate::config::{LanMtu, MTU_MAX, MTU_MIN};
+
 use super::dns::{DnsEditMode, DNS_PRESETS};
+use super::mtu::{MtuEditMode, Preset as MtuPreset, PRESETS as MTU_PRESETS};
 use super::state::MenuItem;
 use super::{App, AppState};
 
@@ -31,6 +34,7 @@ impl App {
             AppState::SelectingLan => self.handle_lan_select_key(key),
             AppState::Active => self.handle_active_key(key),
             AppState::EditingDns => self.handle_dns_edit_key(key),
+            AppState::EditingMtu => self.handle_mtu_edit_key(key),
             AppState::Doctor => self.handle_doctor_key(key),
             AppState::InstallDnsmasq => self.handle_install_dnsmasq_key(key),
             AppState::PreflightBlocked => self.handle_preflight_key(key),
@@ -52,15 +56,11 @@ impl App {
         let items = self.menu_items();
 
         match key {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected_menu_item > 0 {
-                    self.selected_menu_item -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.selected_menu_item > 0 => {
+                self.selected_menu_item -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected_menu_item + 1 < items.len() {
-                    self.selected_menu_item += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.selected_menu_item + 1 < items.len() => {
+                self.selected_menu_item += 1;
             }
             KeyCode::Enter => {
                 if let Some(item) = items.get(self.selected_menu_item) {
@@ -76,6 +76,7 @@ impl App {
                         }
                         MenuItem::ToggleNatPmp => self.toggle_natpmp_preference(),
                         MenuItem::SetDns => self.start_dns_edit(),
+                        MenuItem::SetMtu => self.start_mtu_edit(),
                         MenuItem::RunDoctor => self.start_doctor(),
                         MenuItem::Quit => self.quit(),
                     }
@@ -88,15 +89,11 @@ impl App {
                     self.stop_sharing_async();
                 }
             }
-            KeyCode::Char('2') => {
-                if items.len() > 1 {
-                    match items[1] {
-                        MenuItem::Quit => self.quit(),
-                        MenuItem::StopSharing => self.stop_sharing_async(),
-                        _ => {}
-                    }
-                }
-            }
+            KeyCode::Char('2') if items.len() > 1 => match items[1] {
+                MenuItem::Quit => self.quit(),
+                MenuItem::StopSharing => self.stop_sharing_async(),
+                _ => {}
+            },
             KeyCode::Char('q') => self.quit(),
             KeyCode::Char('d') if self.is_sharing() => self.toggle_debug(),
             KeyCode::Char('l') => self.logs_expanded = !self.logs_expanded,
@@ -221,15 +218,11 @@ impl App {
     fn handle_doctor_key(&mut self, key: KeyCode) {
         let count = self.doctor.results.len();
         match key {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.doctor.selected > 0 {
-                    self.doctor.selected -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.doctor.selected > 0 => {
+                self.doctor.selected -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.doctor.selected + 1 < count {
-                    self.doctor.selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.doctor.selected + 1 < count => {
+                self.doctor.selected += 1;
             }
             KeyCode::Enter | KeyCode::Char('r') => self.run_doctor_async(),
             KeyCode::Char('c') if self.doctor_has_stale_anchor() => self.flush_stale_anchor_async(),
@@ -252,15 +245,11 @@ impl App {
     fn handle_dns_preset_key(&mut self, key: KeyCode) {
         let count = self.dns_preset_count();
         match key {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.dns.preset_selected > 0 {
-                    self.dns.preset_selected -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.dns.preset_selected > 0 => {
+                self.dns.preset_selected -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.dns.preset_selected < count - 1 {
-                    self.dns.preset_selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.dns.preset_selected < count - 1 => {
+                self.dns.preset_selected += 1;
             }
             KeyCode::Char('x') => {
                 // Delete the highlighted history entry. No-op on other rows.
@@ -313,11 +302,9 @@ impl App {
 
     fn handle_dns_custom_input_key(&mut self, key: KeyCode) {
         match key {
-            KeyCode::Char(c) => {
-                // Digits, dots, and colons (for IPv6).
-                if c.is_ascii_digit() || c == '.' || c == ':' {
-                    self.dns.input_buffer.push(c);
-                }
+            // Digits, dots, and colons (for IPv6).
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' || c == ':' => {
+                self.dns.input_buffer.push(c);
             }
             KeyCode::Backspace => {
                 self.dns.input_buffer.pop();
@@ -341,6 +328,111 @@ impl App {
             KeyCode::Esc => self.dns.edit_mode = DnsEditMode::SelectingPreset,
             _ => {}
         }
+    }
+
+    // ===== MTU edit screen =====
+
+    fn handle_mtu_edit_key(&mut self, key: KeyCode) {
+        match self.mtu.edit_mode {
+            MtuEditMode::SelectingPreset => self.handle_mtu_preset_key(key),
+            MtuEditMode::CustomInput => self.handle_mtu_custom_input_key(key),
+        }
+    }
+
+    fn handle_mtu_preset_key(&mut self, key: KeyCode) {
+        let count = MTU_PRESETS.len();
+        match key {
+            KeyCode::Up | KeyCode::Char('k') if self.mtu.preset_selected > 0 => {
+                self.mtu.preset_selected -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.mtu.preset_selected + 1 < count => {
+                self.mtu.preset_selected += 1;
+            }
+            KeyCode::Enter => self.commit_mtu_preset_choice(),
+            KeyCode::Esc => {
+                self.mtu.input_buffer.clear();
+                self.state = AppState::Menu;
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply the highlighted preset row, or switch to custom-input for the
+    /// `Custom...` row.
+    fn commit_mtu_preset_choice(&mut self) {
+        match MTU_PRESETS[self.mtu.preset_selected] {
+            MtuPreset::Auto => {
+                self.mtu.active = LanMtu::Auto;
+                self.log_info("LAN MTU policy: auto (don't touch interface)");
+                self.save_preferences();
+                self.state = AppState::Menu;
+            }
+            MtuPreset::MatchVpn => {
+                self.mtu.active = LanMtu::MatchVpn;
+                self.log_info("LAN MTU policy: match VPN at session start");
+                self.save_preferences();
+                self.state = AppState::Menu;
+            }
+            MtuPreset::Fixed(n, label) => {
+                self.mtu.active = LanMtu::Fixed(n);
+                self.log_success(format!("LAN MTU set to {n} ({label})"));
+                self.save_preferences();
+                self.state = AppState::Menu;
+            }
+            MtuPreset::Custom => {
+                self.mtu.edit_mode = MtuEditMode::CustomInput;
+                self.mtu.input_buffer = match self.mtu.active {
+                    LanMtu::Fixed(n) => n.to_string(),
+                    _ => String::new(),
+                };
+            }
+        }
+    }
+
+    fn handle_mtu_custom_input_key(&mut self, key: KeyCode) {
+        match key {
+            // u16 max is 5 digits; clamp input length to keep parse cheap
+            // and the field visually predictable.
+            KeyCode::Char(c) if c.is_ascii_digit() && self.mtu.input_buffer.len() < 5 => {
+                self.mtu.input_buffer.push(c);
+            }
+            KeyCode::Backspace => {
+                self.mtu.input_buffer.pop();
+            }
+            KeyCode::Enter => {
+                let input = self.mtu.input_buffer.trim();
+                match input.parse::<u16>() {
+                    Ok(n) if (MTU_MIN..=MTU_MAX).contains(&n) => {
+                        self.mtu.active = LanMtu::Fixed(n);
+                        self.log_success(format!("LAN MTU set to {n}"));
+                        self.mtu.input_buffer.clear();
+                        self.save_preferences();
+                        self.state = AppState::Menu;
+                    }
+                    _ => {
+                        self.log_warning(format!(
+                            "MTU out of range ({MTU_MIN}–{MTU_MAX}): {input}"
+                        ));
+                    }
+                }
+            }
+            KeyCode::Esc => self.mtu.edit_mode = MtuEditMode::SelectingPreset,
+            _ => {}
+        }
+    }
+
+    /// Enter the MTU edit screen, pre-selecting the row matching the active
+    /// policy. The actual VPN MTU is resolved at session start, not here —
+    /// keeps the picker reactive and avoids a dependency on a selected VPN.
+    fn start_mtu_edit(&mut self) {
+        self.mtu.edit_mode = MtuEditMode::SelectingPreset;
+        self.mtu.input_buffer = match self.mtu.active {
+            LanMtu::Fixed(n) => n.to_string(),
+            _ => String::new(),
+        };
+        let fresh = super::mtu::MtuConfig::new(self.mtu.active);
+        self.mtu.preset_selected = fresh.preset_selected;
+        self.state = AppState::EditingMtu;
     }
 
     // ===== Screen transitions / commands =====
