@@ -20,6 +20,7 @@ mod log;
 pub mod mtu;
 mod result;
 mod state;
+pub mod traffic;
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -71,6 +72,8 @@ pub struct App {
 
     /// Next scheduled health check time (None when not sharing).
     pub(super) next_health_check: Option<Instant>,
+    /// Next scheduled traffic sample time (None when not sharing).
+    pub(super) next_traffic_sample: Option<Instant>,
     pub vpn_drop_strategy: VpnDropStrategy,
     pub doctor: DoctorState,
     /// Where Esc should return to when leaving the Doctor screen. `None`
@@ -111,6 +114,7 @@ impl App {
             dnsmasq_installed: dnsmasq_available,
             brew_installed: false,
             next_health_check: None,
+            next_traffic_sample: None,
             vpn_drop_strategy: config.vpn_drop_strategy,
             doctor: DoctorState::default(),
             doctor_return_state: None,
@@ -193,9 +197,15 @@ impl App {
         }
 
         if self.is_sharing() && self.pending_op.is_none() {
+            let now = Instant::now();
             if let Some(next) = self.next_health_check {
-                if Instant::now() >= next {
+                if now >= next {
                     self.spawn_health_check();
+                }
+            }
+            if let Some(next) = self.next_traffic_sample {
+                if now >= next {
+                    self.spawn_traffic_sample();
                 }
             }
         }

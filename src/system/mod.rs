@@ -7,6 +7,7 @@ pub mod firewall;
 pub mod natpmp;
 pub mod network;
 pub mod sysctl;
+pub mod traffic;
 
 pub use brew::brew_installed;
 pub use dhcp::DhcpServer;
@@ -18,6 +19,7 @@ pub use network::{
     InterfaceInfo,
 };
 pub use sysctl::IpForwarding;
+pub use traffic::{read_interface_bytes, InterfaceBytes};
 
 use crate::error::{Result, TunshareError};
 

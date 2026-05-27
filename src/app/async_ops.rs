@@ -14,8 +14,8 @@ use crate::error::{Result, TunshareError};
 use crate::health::{self, HealthStatus};
 use crate::system::{
     brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns,
-    dns::get_default_dns, read_mtu, set_mtu, DhcpServer, Firewall, InterfaceInfo, IpForwarding,
-    NatPmpServer,
+    dns::get_default_dns, read_interface_bytes, read_mtu, set_mtu, DhcpServer, Firewall,
+    InterfaceBytes, InterfaceInfo, IpForwarding, NatPmpServer,
 };
 
 use super::App;
@@ -32,6 +32,7 @@ pub(super) const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_DEBUG_INFO: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(3);
+pub(super) const TIMEOUT_TRAFFIC_SAMPLE: Duration = Duration::from_secs(2);
 
 /// `brew install dnsmasq` can be slow: cold tap update, formula download,
 /// dependency build. Generous ceiling — if we hit this, something's wrong.
@@ -95,6 +96,11 @@ pub enum AsyncOpResult {
     },
     HealthCheck {
         status: HealthStatus,
+    },
+    /// Periodic byte-counter sample for the VPN interface. `Err` is treated
+    /// as a transient blip — we just skip the sample.
+    TrafficSample {
+        result: Result<InterfaceBytes>,
     },
     DoctorFinished {
         results: Vec<CheckResult>,
@@ -517,6 +523,27 @@ impl App {
         });
     }
 
+    /// Spawn a single throughput sample for the VPN interface. Independent
+    /// of `pending_op` since it runs throughout the session.
+    pub(super) fn spawn_traffic_sample(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+
+        let tx = self.op_tx.clone();
+        let vpn_name = session.vpn_name.clone();
+        self.next_traffic_sample = Some(Instant::now() + super::traffic::SAMPLE_INTERVAL);
+
+        tokio::spawn(async move {
+            let result =
+                match timeout(TIMEOUT_TRAFFIC_SAMPLE, read_interface_bytes(&vpn_name)).await {
+                    Ok(inner) => inner,
+                    Err(_) => Err(timeout_err("netstat traffic sample")),
+                };
+            let _ = tx.send(AsyncOpResult::TrafficSample { result });
+        });
+    }
+
     /// Run the doctor checks. Empty results table shows a spinner until the
     /// task completes.
     pub(super) fn run_doctor_async(&mut self) {
@@ -629,6 +656,9 @@ impl App {
         self.clear_pending_op();
         self.state = super::AppState::Active;
         self.next_health_check = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
+        // Take the first traffic sample right away so the sparkline starts
+        // populating instead of staying blank for the first second.
+        self.next_traffic_sample = Some(Instant::now());
     }
 
     /// Kick off NAT-PMP startup if enabled. Returns true if a spawn was

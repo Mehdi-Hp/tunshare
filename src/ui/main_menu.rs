@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::mtu::{MtuEditMode, Preset as MtuPreset, PRESETS as MTU_PRESETS};
+use crate::app::traffic::{format_bytes, format_rate, TrafficStats};
 use crate::app::{App, AppState, DnsEditMode, MenuItem, DNS_PRESETS};
 use crate::health::HealthStatus;
 use crate::ui::theme::{borders, colors, styles, symbols};
@@ -895,6 +896,107 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
     // Config rows start after separator + blank
     let config_start_y = sep_y + 2;
     render_config_rows(frame, inner, config_start_y, &lan_ip, app);
+
+    // Traffic block: separator + blank + 3 rows (down, up, totals).
+    let traffic_sep_y = config_start_y + 4;
+    let traffic_block_end = traffic_sep_y + 5;
+    if let Some(session) = app.session.as_ref() {
+        if traffic_block_end <= inner.y + inner.height {
+            render_separator_line(frame, inner, traffic_sep_y);
+            render_traffic_block(frame, inner, traffic_sep_y + 2, &session.traffic);
+        }
+    }
+}
+
+/// Render the down/up/total traffic block at the given y.
+fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &TrafficStats) {
+    let padding = 3u16;
+    let usable_width = inner.width.saturating_sub(padding * 2);
+
+    // Compute the sparkline budget from the *actual* rendered widths so a
+    // tweak to the label or rate format can't silently break alignment.
+    const DOWN_LABEL: &str = "↓ Down  ";
+    const UP_LABEL: &str = "↑ Up    ";
+    const RATE_WIDTH: u16 = 9; // matches the `{:>9}` formatter below
+    const GUTTER: u16 = 2; // spaces between sparkline and rate
+    let label_width = DOWN_LABEL.chars().count().max(UP_LABEL.chars().count()) as u16;
+    let spark_width = usable_width
+        .saturating_sub(label_width + GUTTER + RATE_WIDTH)
+        .clamp(8, 32);
+
+    let down_rate = format_rate(stats.rate_down);
+    let up_rate = format_rate(stats.rate_up);
+    let down_spark = stats.sparkline_down(spark_width as usize);
+    let up_spark = stats.sparkline_up(spark_width as usize);
+
+    let down_color = colors::SUCCESS;
+    let up_color = colors::LAN;
+
+    // Row 1: ↓ Down   <spark>   <rate>
+    let line_down = Line::from(vec![
+        Span::styled(
+            DOWN_LABEL,
+            Style::default().fg(down_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(down_spark, Style::default().fg(down_color)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:>width$}", down_rate, width = RATE_WIDTH as usize),
+            Style::default().fg(colors::TEXT_PRIMARY),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line_down),
+        Rect::new(inner.x + padding, start_y, usable_width, 1),
+    );
+
+    // Row 2: ↑ Up     <spark>   <rate>
+    let line_up = Line::from(vec![
+        Span::styled(
+            UP_LABEL,
+            Style::default().fg(up_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(up_spark, Style::default().fg(up_color)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:>width$}", up_rate, width = RATE_WIDTH as usize),
+            Style::default().fg(colors::TEXT_PRIMARY),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line_up),
+        Rect::new(inner.x + padding, start_y + 1, usable_width, 1),
+    );
+
+    // Row 3 (blank), row 4: Total   ↓ <bytes>   ↑ <bytes>
+    let total_label = Span::styled("Total", Style::default().fg(colors::TEXT_SECONDARY));
+    let total_value = Line::from(vec![
+        Span::styled("↓ ", Style::default().fg(down_color)),
+        Span::styled(
+            format_bytes(stats.total_down),
+            Style::default().fg(colors::TEXT_PRIMARY),
+        ),
+        Span::raw("   "),
+        Span::styled("↑ ", Style::default().fg(up_color)),
+        Span::styled(
+            format_bytes(stats.total_up),
+            Style::default().fg(colors::TEXT_PRIMARY),
+        ),
+    ]);
+    let total_value_str: String = total_value
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    let total_value_width = total_value_str.chars().count() as u16;
+    let label_w = "Total".chars().count() as u16;
+    let gap = usable_width.saturating_sub(label_w + total_value_width);
+    let mut spans = vec![total_label, Span::raw(" ".repeat(gap as usize))];
+    spans.extend(total_value.spans);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(inner.x + padding, start_y + 3, usable_width, 1),
+    );
 }
 
 /// Render the diagram (labels, boxes, arrow) into the given inner area at the specified y offset.

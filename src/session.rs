@@ -3,6 +3,7 @@
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
+use crate::app::traffic::TrafficStats;
 use crate::health::HealthStatus;
 use crate::system::{DhcpServer, Firewall, IpForwarding, NatPmpServer};
 
@@ -50,6 +51,9 @@ pub struct SharingSession {
     /// When the VPN was first observed Down (None when healthy).
     /// Used to compute the auto-stop countdown under `WaitWithTimeout`.
     pub degraded_since: Option<Instant>,
+    /// Throughput stats for the VPN interface. Populated by the periodic
+    /// sampler in `App::poll_async_results`.
+    pub traffic: TrafficStats,
 }
 
 impl SharingSession {
@@ -74,6 +78,7 @@ impl SharingSession {
             original_mtu: None,
             health_status: HealthStatus::default(),
             degraded_since: None,
+            traffic: TrafficStats::new(),
         }
     }
 

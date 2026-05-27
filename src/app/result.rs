@@ -12,7 +12,9 @@ use crate::system::{Firewall, InterfaceInfo, IpForwarding};
 use super::async_ops::{
     AsyncOpResult, DebugInfo, PendingOp, HEALTH_CHECK_INTERVAL, HEALTH_RECHECK_DEGRADED,
 };
+use super::traffic::SAMPLE_INTERVAL;
 use super::{App, AppState};
+use crate::system::InterfaceBytes;
 
 impl App {
     /// Dispatch a completed async result to its handler. The stale-result
@@ -47,6 +49,7 @@ impl App {
             } => self.on_sharing_stopped(result, firewall, ip_forwarding),
             AsyncOpResult::DebugInfoFetched { info } => self.on_debug_info_fetched(info),
             AsyncOpResult::HealthCheck { status } => self.handle_health_result(status),
+            AsyncOpResult::TrafficSample { result } => self.handle_traffic_sample(result),
             AsyncOpResult::DoctorFinished { results } => self.on_doctor_finished(results),
             AsyncOpResult::DoctorAnchorFlushed { result } => self.on_doctor_anchor_flushed(result),
             AsyncOpResult::DnsmasqInstalled {
@@ -66,6 +69,8 @@ impl App {
                 | (AsyncOpResult::SharingStopped { .. }, _)
                 // Health checks run outside the pending-op system.
                 | (AsyncOpResult::HealthCheck { .. }, _)
+                // Traffic samples run outside the pending-op system too.
+                | (AsyncOpResult::TrafficSample { .. }, _)
                 | (AsyncOpResult::InterfacesDetected { .. }, Some(PendingOp::DetectingInterfaces))
                 | (AsyncOpResult::DnsDiscovered { .. }, Some(PendingOp::DiscoveringDns))
                 | (AsyncOpResult::DhcpStarted { .. }, Some(PendingOp::StartingDhcp))
@@ -332,6 +337,7 @@ impl App {
 
         self.session = None;
         self.next_health_check = None;
+        self.next_traffic_sample = None;
         self.state = AppState::Menu;
         self.selected_menu_item = 0;
         self.show_debug = false;
@@ -481,6 +487,22 @@ impl App {
         } else {
             self.next_health_check = Some(now + HEALTH_CHECK_INTERVAL);
         }
+    }
+
+    /// Fold a fresh `(ibytes, obytes)` sample into the session's stats.
+    /// Errors are non-fatal — we just skip this tick.
+    pub(super) fn handle_traffic_sample(&mut self, result: Result<InterfaceBytes>) {
+        // Reschedule unconditionally so a transient error doesn't stall the
+        // sampler permanently.
+        self.next_traffic_sample = Some(Instant::now() + SAMPLE_INTERVAL);
+
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Ok(bytes) = result else { return };
+        session
+            .traffic
+            .record_sample(bytes.ibytes, bytes.obytes, Instant::now());
     }
 
     // ===== Small shared helpers =====
