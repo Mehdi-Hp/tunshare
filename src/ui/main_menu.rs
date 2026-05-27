@@ -898,7 +898,7 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
     render_config_rows(frame, inner, config_start_y, &lan_ip, app);
 
     // Traffic block: separator + blank + 3 rows (down, up, totals).
-    let traffic_sep_y = config_start_y + 4;
+    let traffic_sep_y = config_start_y + 5;
     let traffic_block_end = traffic_sep_y + 5;
     if let Some(session) = app.session.as_ref() {
         if traffic_block_end <= inner.y + inner.height {
@@ -920,9 +920,11 @@ fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &Tr
     const RATE_WIDTH: u16 = 9; // matches the `{:>9}` formatter below
     const GUTTER: u16 = 2; // spaces between sparkline and rate
     let label_width = DOWN_LABEL.chars().count().max(UP_LABEL.chars().count()) as u16;
+    // Fill all remaining horizontal space — keep a small floor so the
+    // sparkline stays legible in pathologically narrow terminals.
     let spark_width = usable_width
         .saturating_sub(label_width + GUTTER + RATE_WIDTH)
-        .clamp(8, 32);
+        .max(8);
 
     let down_rate = format_rate(stats.rate_down);
     let up_rate = format_rate(stats.rate_up);
@@ -1083,8 +1085,19 @@ fn render_config_rows(frame: &mut Frame, inner: Rect, start_y: u16, gateway: &st
 
     let natpmp_status = if natpmp_active { "Active" } else { "Off" };
 
+    // Tunnel MTU + MSS clamp from the active upstream. Surfacing this
+    // makes a VPN-switch reload visible (the value changes) and lets the
+    // user eyeball whether the clamp matches the path they expect.
+    let tunnel_str = match app.session.as_ref() {
+        Some(s) if s.upstream.mtu > 0 => {
+            format!("{} (MSS {})", s.upstream.mtu, s.upstream.mss_v4())
+        }
+        _ => "—".to_string(),
+    };
+
     let config_items: &[(&str, String, bool)] = &[
         ("Gateway", gateway.to_string(), false),
+        ("Tunnel", tunnel_str, false),
         ("DNS", dns_str, false),
         ("WAN", dhcp_status, dhcp_active),
         ("NAT-PMP", natpmp_status.to_string(), natpmp_active),
