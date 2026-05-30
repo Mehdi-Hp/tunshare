@@ -8,14 +8,13 @@ use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
 
-use crate::config::LanMtu;
 use crate::doctor::{self, CheckResult};
 use crate::error::{Result, TunshareError};
 use crate::health::{self, HealthStatus};
 use crate::system::{
     brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns,
-    dns::get_default_dns, read_interface_bytes, read_mtu, set_mtu, DhcpServer, Firewall,
-    InterfaceBytes, InterfaceInfo, IpForwarding, NatPmpServer,
+    dns::get_default_dns, read_interface_bytes, DhcpServer, Firewall, InterfaceBytes,
+    InterfaceInfo, IpForwarding, NatPmpServer,
 };
 
 use super::App;
@@ -74,11 +73,10 @@ pub enum AsyncOpResult {
         system_servers: Result<Vec<String>>,
     },
     SharingStarted {
-        /// On success: the original LAN MTU we snapshotted before applying a
-        /// new one (`None` when the policy was `Auto` so nothing changed),
-        /// plus the upstream we detected so the session can adopt its real
-        /// MTU (the session was constructed with a placeholder MTU=0).
-        result: Result<(Option<u16>, crate::session::ActiveUpstream)>,
+        /// On success: the upstream we resolved (name + link MTU + effective
+        /// clamp MTU) so the session can adopt it — the session is constructed
+        /// with a placeholder (MTU=0) until this lands.
+        result: Result<crate::session::ActiveUpstream>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     },
@@ -180,26 +178,6 @@ fn timeout_err(command: &str) -> TunshareError {
     }
 }
 
-// ===== MTU policy resolution =====
-
-/// Resolve the user's LAN MTU policy and apply it. Returns `Some(original)`
-/// when we changed the MTU (so caller can store it for restore), or `None`
-/// when the policy was `Auto` or the resolved value already matched the
-/// current MTU (nothing to undo).
-async fn apply_lan_mtu(vpn_name: &str, lan_name: &str, policy: LanMtu) -> Result<Option<u16>> {
-    let target = match policy {
-        LanMtu::Auto => return Ok(None),
-        LanMtu::Fixed(n) => n,
-        LanMtu::MatchVpn => read_mtu(vpn_name).await?,
-    };
-    let current = read_mtu(lan_name).await?;
-    if current == target {
-        return Ok(None);
-    }
-    set_mtu(lan_name, target).await?;
-    Ok(Some(current))
-}
-
 // ===== Spawners =====
 
 impl App {
@@ -282,16 +260,17 @@ impl App {
         self.set_pending_op(PendingOp::StartingSharing);
 
         let lan_ip = lan_ip.unwrap_or(Ipv4Addr::UNSPECIFIED);
-        // Placeholder MTU — the spawn detects the real value via
-        // `ActiveUpstream::detect` and emits it on `SharingStarted` so the
-        // session's upstream gets filled in once rules are loaded. Until
-        // then nothing reads `upstream.mtu` (the spawn computes its own).
+        // Placeholder upstream — the spawn resolves the real values via
+        // `ActiveUpstream::detect` and emits them on `SharingStarted` so the
+        // session's upstream gets filled in once rules are loaded. Until then
+        // nothing reads its MTU fields (the spawn computes its own).
         let mut session = crate::session::SharingSession::new(
             Firewall::new(),
             IpForwarding::new(),
             crate::session::ActiveUpstream {
                 name: vpn_name.clone(),
-                mtu: 0,
+                link_mtu: 0,
+                effective_mtu: 0,
             },
             lan_name.clone(),
             lan_ip,
@@ -306,44 +285,36 @@ impl App {
         let mtu_policy = self.mtu.active;
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            let result = timeout(TIMEOUT_START_SHARING, async {
-                ip_forwarding.enable().await?;
+            let result =
+                timeout(TIMEOUT_START_SHARING, async {
+                    ip_forwarding.enable().await?;
 
-                // Detect the upstream's MTU first so the pf scrub `max-mss`
-                // tracks the tunnel and we have a concrete value to seed
-                // `session.upstream.mtu` with on success.
-                let upstream = match crate::session::ActiveUpstream::detect(vpn_name.clone()).await
-                {
-                    Ok(u) => u,
-                    Err(e) => {
+                    // Resolve the upstream first (link MTU + the effective clamp
+                    // MTU, which under `Auto` runs the path-MTU probe) so the pf
+                    // scrub `max-mss` reflects the real path, not the tunnel's
+                    // inflated interface MTU.
+                    let upstream =
+                        match crate::session::ActiveUpstream::detect(vpn_name.clone(), mtu_policy)
+                            .await
+                        {
+                            Ok(u) => u,
+                            Err(e) => {
+                                let _ = ip_forwarding.restore().await;
+                                return Err(e);
+                            }
+                        };
+
+                    if let Err(e) = firewall
+                        .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
+                        .await
+                    {
                         let _ = ip_forwarding.restore().await;
                         return Err(e);
                     }
-                };
 
-                if let Err(e) = firewall
-                    .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
-                    .await
-                {
-                    let _ = ip_forwarding.restore().await;
-                    return Err(e);
-                }
-
-                let original_mtu = match apply_lan_mtu(&upstream.name, &lan_name, mtu_policy).await
-                {
-                    Ok(opt) => opt,
-                    Err(e) => {
-                        // MTU step failed — roll back firewall + ip_forwarding
-                        // so the box doesn't end up half-configured.
-                        let _ = firewall.cleanup().await;
-                        let _ = ip_forwarding.restore().await;
-                        return Err(e);
-                    }
-                };
-
-                Ok((original_mtu, upstream))
-            })
-            .await;
+                    Ok(upstream)
+                })
+                .await;
 
             let result = match result {
                 Ok(inner) => inner,
@@ -612,15 +583,13 @@ impl App {
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
             let outcome = timeout(TIMEOUT_RELOAD_UPSTREAM, async {
-                let upstream = crate::session::ActiveUpstream::detect(new_name).await?;
+                // Re-resolve against the new tunnel — a different provider /
+                // protocol means a different path MTU, so the probe re-runs
+                // and the clamp tracks the swap.
+                let upstream = crate::session::ActiveUpstream::detect(new_name, mtu_policy).await?;
                 firewall
                     .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
                     .await?;
-                // Re-apply LAN MTU against the new upstream. Discard the
-                // returned snapshot — `session.original_mtu` already holds
-                // the *true* baseline from session start; overwriting it
-                // would lose the restore target on Drop.
-                let _ = apply_lan_mtu(&upstream.name, &lan_name, mtu_policy).await?;
                 Ok::<_, TunshareError>(upstream)
             })
             .await;

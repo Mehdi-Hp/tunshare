@@ -1,16 +1,15 @@
-//! LAN MTU configuration, presets, and edit-mode state.
+//! Tunnel MTU configuration, presets, and edit-mode state.
 
 use crate::config::LanMtu;
 
 /// A row in the MTU preset picker.
 ///
-/// `MatchVpn` resolves to the VPN's current MTU each time sharing starts —
-/// it's stored as a sentinel, not a frozen number, so it tracks tunnel
-/// changes across reconnects.
+/// `Auto` measures the real path MTU with an active probe each time sharing
+/// starts (tracking tunnel changes across reconnects); the `Fixed` rows pin a
+/// known tunnel MTU. Either way the pf scrub clamp is `MTU - 40`.
 #[derive(Debug, Clone, Copy)]
 pub enum Preset {
     Auto,
-    MatchVpn,
     Fixed(u16, &'static str),
     Custom,
 }
@@ -18,7 +17,6 @@ pub enum Preset {
 /// Built-in preset rows, in the order shown in the picker.
 pub const PRESETS: &[Preset] = &[
     Preset::Auto,
-    Preset::MatchVpn,
     Preset::Fixed(1500, "Ethernet"),
     Preset::Fixed(1492, "PPPoE"),
     Preset::Fixed(1420, "WireGuard"),
@@ -36,7 +34,7 @@ pub enum MtuEditMode {
     CustomInput,
 }
 
-/// MTU configuration and edit state.
+/// Tunnel MTU configuration and edit state.
 pub struct MtuConfig {
     /// Active policy (mirrors `Config::lan_mtu`).
     pub active: LanMtu,
@@ -52,7 +50,6 @@ impl MtuConfig {
     pub fn new(active: LanMtu) -> Self {
         let preset_selected = match active {
             LanMtu::Auto => 0,
-            LanMtu::MatchVpn => 1,
             LanMtu::Fixed(n) => PRESETS
                 .iter()
                 .position(|p| matches!(p, Preset::Fixed(v, _) if *v == n))
@@ -70,7 +67,6 @@ impl MtuConfig {
     pub fn active_label(&self) -> String {
         match self.active {
             LanMtu::Auto => "Auto".to_string(),
-            LanMtu::MatchVpn => "Match VPN".to_string(),
             LanMtu::Fixed(n) => n.to_string(),
         }
     }
@@ -83,9 +79,8 @@ mod tests {
     #[test]
     fn preset_selected_round_trips_fixed_presets() {
         assert_eq!(MtuConfig::new(LanMtu::Auto).preset_selected, 0);
-        assert_eq!(MtuConfig::new(LanMtu::MatchVpn).preset_selected, 1);
-        // 1420 (WireGuard) is at index 4 in PRESETS.
-        assert_eq!(MtuConfig::new(LanMtu::Fixed(1420)).preset_selected, 4);
+        // 1420 (WireGuard) is at index 3 in PRESETS.
+        assert_eq!(MtuConfig::new(LanMtu::Fixed(1420)).preset_selected, 3);
     }
 
     #[test]
@@ -100,7 +95,6 @@ mod tests {
     #[test]
     fn active_label_for_each_variant() {
         assert_eq!(MtuConfig::new(LanMtu::Auto).active_label(), "Auto");
-        assert_eq!(MtuConfig::new(LanMtu::MatchVpn).active_label(), "Match VPN");
         assert_eq!(MtuConfig::new(LanMtu::Fixed(1420)).active_label(), "1420");
     }
 }

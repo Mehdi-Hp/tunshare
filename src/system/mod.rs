@@ -6,6 +6,7 @@ pub mod dns;
 pub mod firewall;
 pub mod natpmp;
 pub mod network;
+pub mod pmtu;
 pub mod sysctl;
 pub mod traffic;
 
@@ -16,8 +17,9 @@ pub use firewall::Firewall;
 pub use natpmp::NatPmpServer;
 pub use network::{
     default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, read_mtu,
-    same_ipv4_network, set_mtu, InterfaceInfo,
+    same_ipv4_network, InterfaceInfo,
 };
+pub use pmtu::{probe_path_mtu, CONSERVATIVE_MTU};
 pub use sysctl::IpForwarding;
 pub use traffic::{read_interface_bytes, InterfaceBytes};
 

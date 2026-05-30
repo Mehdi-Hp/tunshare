@@ -20,17 +20,22 @@ pub const MTU_MIN: u16 = 576;
 /// larger values on most interface types.
 pub const MTU_MAX: u16 = 9000;
 
-/// LAN-interface MTU policy.
+/// Tunnel MTU policy — the value the pf scrub `max-mss` clamp derives from.
 ///
-/// `Auto` leaves the interface alone (default). `MatchVpn` reads the VPN's
-/// current MTU at session start and applies it to the LAN, tracking the tunnel
-/// automatically. `Fixed(n)` pins an explicit value.
+/// `Auto` (default) measures the real path MTU with an active probe at session
+/// start, so the clamp tracks encapsulation overhead a tunnel's interface MTU
+/// hides. `Fixed(n)` pins an explicit tunnel MTU (clamp = `n - 40`), skipping
+/// the probe.
+///
+/// The old `match_vpn` policy is gone — it copied the tunnel's (often inflated)
+/// interface MTU, which is exactly what `Auto` now improves on. Configs that
+/// still carry it deserialize to `Auto` via the serde alias.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(tag = "mode", content = "value", rename_all = "snake_case")]
 pub enum LanMtu {
     #[default]
+    #[serde(alias = "match_vpn")]
     Auto,
-    MatchVpn,
     Fixed(u16),
 }
 
@@ -64,8 +69,7 @@ pub struct Config {
     #[serde(default)]
     pub vpn_drop_strategy: VpnDropStrategy,
 
-    /// LAN-interface MTU policy. Applied when sharing starts; original is
-    /// restored on stop. See [`LanMtu`].
+    /// Tunnel MTU policy driving the pf scrub MSS clamp. See [`LanMtu`].
     #[serde(default)]
     pub lan_mtu: LanMtu,
 }
@@ -132,5 +136,43 @@ impl Config {
         };
 
         let _ = fs::write(&path, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_match_vpn_migrates_to_auto() {
+        let mtu: LanMtu = serde_json::from_str(r#"{"mode":"match_vpn"}"#).unwrap();
+        assert_eq!(mtu, LanMtu::Auto);
+    }
+
+    #[test]
+    fn lan_mtu_variants_round_trip() {
+        let auto: LanMtu = serde_json::from_str(r#"{"mode":"auto"}"#).unwrap();
+        assert_eq!(auto, LanMtu::Auto);
+        let fixed: LanMtu = serde_json::from_str(r#"{"mode":"fixed","value":1440}"#).unwrap();
+        assert_eq!(fixed, LanMtu::Fixed(1440));
+    }
+
+    #[test]
+    fn legacy_config_with_match_vpn_keeps_other_prefs() {
+        // A config written by an older version: the dropped `match_vpn` token
+        // must migrate in place, not discard the surrounding preferences.
+        let json = r#"{
+            "dhcp_enabled": false,
+            "natpmp_enabled": false,
+            "custom_dns": "1.1.1.1",
+            "dns_history": ["1.1.1.1", "8.8.8.8"],
+            "lan_mtu": {"mode": "match_vpn"}
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.lan_mtu, LanMtu::Auto);
+        assert!(!cfg.dhcp_enabled);
+        assert!(!cfg.natpmp_enabled);
+        assert_eq!(cfg.custom_dns.as_deref(), Some("1.1.1.1"));
+        assert_eq!(cfg.dns_history, vec!["1.1.1.1", "8.8.8.8"]);
     }
 }

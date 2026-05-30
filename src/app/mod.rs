@@ -305,7 +305,8 @@ mod tests {
             crate::system::IpForwarding::new(),
             crate::session::ActiveUpstream {
                 name: "utun4".to_string(),
-                mtu: 1500,
+                link_mtu: 1500,
+                effective_mtu: 1400,
             },
             "en0".to_string(),
             Ipv4Addr::new(192, 168, 2, 1),

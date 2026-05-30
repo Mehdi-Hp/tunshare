@@ -363,19 +363,13 @@ impl App {
         match MTU_PRESETS[self.mtu.preset_selected] {
             MtuPreset::Auto => {
                 self.mtu.active = LanMtu::Auto;
-                self.log_info("LAN MTU policy: auto (don't touch interface)");
-                self.save_preferences();
-                self.state = AppState::Menu;
-            }
-            MtuPreset::MatchVpn => {
-                self.mtu.active = LanMtu::MatchVpn;
-                self.log_info("LAN MTU policy: match VPN at session start");
+                self.log_info("Tunnel MTU: auto (measure path MTU at session start)");
                 self.save_preferences();
                 self.state = AppState::Menu;
             }
             MtuPreset::Fixed(n, label) => {
                 self.mtu.active = LanMtu::Fixed(n);
-                self.log_success(format!("LAN MTU set to {n} ({label})"));
+                self.log_success(format!("Tunnel MTU set to {n} ({label})"));
                 self.save_preferences();
                 self.state = AppState::Menu;
             }
@@ -404,7 +398,7 @@ impl App {
                 match input.parse::<u16>() {
                     Ok(n) if (MTU_MIN..=MTU_MAX).contains(&n) => {
                         self.mtu.active = LanMtu::Fixed(n);
-                        self.log_success(format!("LAN MTU set to {n}"));
+                        self.log_success(format!("Tunnel MTU set to {n}"));
                         self.mtu.input_buffer.clear();
                         self.save_preferences();
                         self.state = AppState::Menu;

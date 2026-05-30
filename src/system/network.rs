@@ -147,21 +147,6 @@ pub async fn read_mtu(iface: &str) -> Result<u16> {
         .ok_or_else(|| TunshareError::ParseError(format!("no MTU line for interface <{iface}>")))
 }
 
-/// Set the MTU of `iface` to `mtu` via `ifconfig <iface> mtu <mtu>`.
-/// Requires root.
-pub async fn set_mtu(iface: &str, mtu: u16) -> Result<()> {
-    let mtu_str = mtu.to_string();
-    let output = run_cmd("ifconfig", &[iface, "mtu", &mtu_str]).await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(TunshareError::CommandFailed {
-            command: format!("ifconfig {iface} mtu {mtu}"),
-            message: stderr.trim().to_string(),
-        });
-    }
-    Ok(())
-}
-
 /// Extract the MTU from the first interface header line in ifconfig output.
 fn parse_mtu(output: &str) -> Option<u16> {
     for line in output.lines() {

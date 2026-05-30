@@ -4,9 +4,12 @@ use std::net::Ipv4Addr;
 use std::time::Instant;
 
 use crate::app::traffic::TrafficStats;
+use crate::config::LanMtu;
 use crate::error::Result;
 use crate::health::HealthStatus;
-use crate::system::{read_mtu, DhcpServer, Firewall, IpForwarding, NatPmpServer};
+use crate::system::{
+    probe_path_mtu, read_mtu, DhcpServer, Firewall, IpForwarding, NatPmpServer, CONSERVATIVE_MTU,
+};
 
 /// IPv4 TCP/IP header overhead used to clamp MSS from MTU in the pf scrub rule.
 const IPV4_TCP_HEADER_OVERHEAD: u16 = 40;
@@ -18,36 +21,56 @@ const MIN_SAFE_MSS: u16 = 216;
 /// The VPN tunnel currently carrying LAN traffic.
 ///
 /// Single source of truth for the upstream's name + MTU. Every consumer
-/// (pf nat rule, pf scrub `max-mss`, `ifconfig <lan> mtu`, NAT-PMP bind,
-/// health probe, traffic sampler) reads from one of these — no more
-/// independent `read_mtu` calls scattered around.
+/// (pf nat rule, pf scrub `max-mss`, NAT-PMP bind, health probe, traffic
+/// sampler) reads from one of these — no more independent `read_mtu` calls
+/// scattered around.
 #[derive(Debug, Clone)]
 pub struct ActiveUpstream {
     pub name: String,
-    pub mtu: u16,
+    /// Raw MTU the utun reports. On encapsulating tunnels (OpenVPN-UDP) this
+    /// over-reports what the path can carry — that's the bug this whole module
+    /// works around — so it's kept only for display/debug, never the clamp.
+    pub link_mtu: u16,
+    /// Effective MTU that drives the pf scrub clamp: the probed path MTU under
+    /// `Auto`, the user's value under `Fixed`, or the conservative cap when a
+    /// probe is inconclusive. Always ≤ `link_mtu` in practice.
+    pub effective_mtu: u16,
 }
 
 impl ActiveUpstream {
-    /// Build an `ActiveUpstream` by reading the iface's current MTU.
-    pub async fn detect(name: String) -> Result<Self> {
-        let mtu = read_mtu(&name).await?;
-        Ok(Self { name, mtu })
+    /// Build an `ActiveUpstream`: read the link MTU, then resolve the effective
+    /// (clamp-driving) MTU per the user's policy. Under `Auto` this runs the
+    /// active path-MTU probe, which never fails hard — it degrades to a cap.
+    pub async fn detect(name: String, policy: LanMtu) -> Result<Self> {
+        let link_mtu = read_mtu(&name).await?;
+        let effective_mtu = Self::resolve_effective(&name, link_mtu, policy).await;
+        Ok(Self {
+            name,
+            link_mtu,
+            effective_mtu,
+        })
     }
 
-    /// MSS clamp for IPv4 pf scrub rules. `mtu - 40`, floored.
+    /// Resolve the effective MTU that the MSS clamp derives from. `Auto`
+    /// measures the real path MTU and, when the probe is inconclusive (ICMP
+    /// blocked, errors, budget spent), falls back to `min(link_mtu,
+    /// CONSERVATIVE_MTU)` — never the inflated `link_mtu`. `Fixed(n)` trusts
+    /// the user's value outright and skips the probe.
+    async fn resolve_effective(name: &str, link_mtu: u16, policy: LanMtu) -> u16 {
+        match policy {
+            LanMtu::Auto => probe_path_mtu(name, link_mtu)
+                .await
+                .unwrap_or_else(|| link_mtu.min(CONSERVATIVE_MTU)),
+            LanMtu::Fixed(n) => n,
+        }
+    }
+
+    /// MSS clamp for IPv4 pf scrub rules. `effective_mtu - 40`, floored.
     pub fn mss_v4(&self) -> u16 {
-        self.mtu
+        self.effective_mtu
             .saturating_sub(IPV4_TCP_HEADER_OVERHEAD)
             .max(MIN_SAFE_MSS)
     }
-}
-
-/// Synchronously restore a LAN interface's MTU. Used by Drop where we can't
-/// await — relies on `ifconfig` being fast (< 100ms in practice).
-fn restore_mtu_sync(iface: &str, mtu: u16) {
-    let _ = std::process::Command::new("ifconfig")
-        .args([iface, "mtu", &mtu.to_string()])
-        .output();
 }
 
 /// Represents an active VPN sharing session.
@@ -79,9 +102,6 @@ pub struct SharingSession {
     pub natpmp_active: bool,
     /// Handle to the running NAT-PMP server (for shutdown signaling).
     natpmp_server: Option<NatPmpServer>,
-    /// Original LAN MTU captured before we changed it. Restored on Drop.
-    /// `None` means we never modified the MTU (skip restore).
-    pub original_mtu: Option<u16>,
     /// Connection health status (updated by periodic checks).
     pub health_status: HealthStatus,
     /// When the VPN was first observed Down (None when healthy).
@@ -111,7 +131,6 @@ impl SharingSession {
             dhcp_range: None,
             natpmp_active: false,
             natpmp_server: None,
-            original_mtu: None,
             health_status: HealthStatus::default(),
             degraded_since: None,
             traffic: TrafficStats::new(),
@@ -179,11 +198,6 @@ impl Drop for SharingSession {
         if let Some(ref mut fwd) = self.ip_forwarding {
             fwd.restore_sync();
         }
-
-        // MTU last — cosmetic, can't break cleanup ordering if it fails.
-        if let Some(mtu) = self.original_mtu {
-            restore_mtu_sync(&self.lan_name, mtu);
-        }
     }
 }
 
@@ -191,28 +205,32 @@ impl Drop for SharingSession {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mss_v4_subtracts_ipv4_overhead() {
-        let u = ActiveUpstream {
+    fn upstream(effective_mtu: u16) -> ActiveUpstream {
+        ActiveUpstream {
             name: "utun10".into(),
-            mtu: 1500,
-        };
-        assert_eq!(u.mss_v4(), 1460);
+            link_mtu: 1500,
+            effective_mtu,
+        }
+    }
 
-        let u = ActiveUpstream {
-            name: "utun11".into(),
-            mtu: 1380,
-        };
-        assert_eq!(u.mss_v4(), 1340);
+    #[test]
+    fn mss_v4_subtracts_ipv4_overhead_from_effective_mtu() {
+        // The clamp tracks the effective MTU, not the (possibly inflated) link.
+        assert_eq!(upstream(1500).mss_v4(), 1460);
+        assert_eq!(upstream(1440).mss_v4(), 1400);
+        assert_eq!(upstream(1380).mss_v4(), 1340);
     }
 
     #[test]
     fn mss_v4_clamps_to_floor() {
         // Pathological MTU values shouldn't emit a sub-216 MSS rule.
-        let u = ActiveUpstream {
-            name: "broken".into(),
-            mtu: 0,
-        };
-        assert_eq!(u.mss_v4(), 216);
+        assert_eq!(upstream(0).mss_v4(), 216);
+    }
+
+    #[tokio::test]
+    async fn fixed_policy_uses_the_value_verbatim_without_probing() {
+        // `Fixed` must never touch the network — it trusts the user's value.
+        let mtu = ActiveUpstream::resolve_effective("utun10", 1500, LanMtu::Fixed(1440)).await;
+        assert_eq!(mtu, 1440);
     }
 }

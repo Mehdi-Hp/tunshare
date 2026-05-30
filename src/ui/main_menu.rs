@@ -318,11 +318,11 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
             ],
         ),
         MenuItem::SetMtu => (
-            "LAN MTU",
+            "Tunnel MTU",
             vec![
-                "Pin the LAN interface MTU. Match VPN",
-                "tracks the tunnel; Auto leaves it alone.",
-                "Restored on stop.",
+                "Sets the MSS clamp for shared traffic.",
+                "Auto measures the real path MTU; pin a",
+                "value if you know your tunnel's MTU.",
             ],
         ),
         MenuItem::RunDoctor => (
@@ -442,7 +442,7 @@ fn menu_item_label_str(item: &MenuItem) -> &'static str {
         MenuItem::ToggleDhcp => "DHCP Server",
         MenuItem::ToggleNatPmp => "NAT-PMP Server",
         MenuItem::SetDns => "DNS Server",
-        MenuItem::SetMtu => "LAN MTU",
+        MenuItem::SetMtu => "Tunnel MTU",
         MenuItem::RunDoctor => "Run Doctor",
         MenuItem::Quit => "Quit",
     }
@@ -487,7 +487,7 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             ("DNS Server".to_string(), Some(StatusBadge::Value(value)))
         }
         MenuItem::SetMtu => (
-            "LAN MTU".to_string(),
+            "Tunnel MTU".to_string(),
             Some(StatusBadge::Value(app.mtu.active_label())),
         ),
         MenuItem::RunDoctor => ("Run Doctor".to_string(), None),
@@ -729,7 +729,7 @@ fn render_mtu_preset_list(frame: &mut Frame, area: Rect, app: &App) {
     let card_area = Rect::new(card_x, card_y, card_width, card_height);
 
     frame.render_widget(Clear, area);
-    let card = Card::new(Span::styled(" Set LAN MTU ", styles::card_title())).focused(true);
+    let card = Card::new(Span::styled(" Set Tunnel MTU ", styles::card_title())).focused(true);
     frame.render_widget(card, card_area);
 
     let inner = Rect::new(
@@ -767,8 +767,7 @@ fn render_mtu_preset_list(frame: &mut Frame, area: Rect, app: &App) {
             "     ".to_string()
         };
         let (label, hint) = match preset {
-            MtuPreset::Auto => ("Auto (don't change)".to_string(), String::new()),
-            MtuPreset::MatchVpn => ("Match VPN".to_string(), "resolves at start".to_string()),
+            MtuPreset::Auto => ("Auto".to_string(), "measure path MTU".to_string()),
             MtuPreset::Fixed(n, kind) => (format!("{n}"), (*kind).to_string()),
             MtuPreset::Custom => ("Custom...".to_string(), String::new()),
         };
@@ -797,7 +796,7 @@ fn render_mtu_custom_input(frame: &mut Frame, area: Rect, app: &App) {
     let card_area = Rect::new(card_x, card_y, card_width, card_height);
 
     frame.render_widget(Clear, area);
-    let card = Card::new(Span::styled(" Custom LAN MTU ", styles::card_title())).focused(true);
+    let card = Card::new(Span::styled(" Custom Tunnel MTU ", styles::card_title())).focused(true);
     frame.render_widget(card, card_area);
 
     let inner = Rect::new(
@@ -1085,12 +1084,13 @@ fn render_config_rows(frame: &mut Frame, inner: Rect, start_y: u16, gateway: &st
 
     let natpmp_status = if natpmp_active { "Active" } else { "Off" };
 
-    // Tunnel MTU + MSS clamp from the active upstream. Surfacing this
-    // makes a VPN-switch reload visible (the value changes) and lets the
-    // user eyeball whether the clamp matches the path they expect.
+    // Effective tunnel MTU + the MSS clamp it drives. This is the *effective*
+    // MTU (probed path MTU, a manual Fixed value, or the conservative cap) —
+    // not the tunnel's raw interface MTU — so it reflects what the clamp
+    // actually uses and makes a VPN-switch reload visible.
     let tunnel_str = match app.session.as_ref() {
-        Some(s) if s.upstream.mtu > 0 => {
-            format!("{} (MSS {})", s.upstream.mtu, s.upstream.mss_v4())
+        Some(s) if s.upstream.effective_mtu > 0 => {
+            format!("{} (MSS {})", s.upstream.effective_mtu, s.upstream.mss_v4())
         }
         _ => "—".to_string(),
     };

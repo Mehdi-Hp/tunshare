@@ -226,7 +226,7 @@ impl App {
 
     fn on_sharing_started(
         &mut self,
-        result: Result<(Option<u16>, crate::session::ActiveUpstream)>,
+        result: Result<crate::session::ActiveUpstream>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     ) {
@@ -242,16 +242,21 @@ impl App {
         }
 
         match result {
-            Ok((original_mtu, upstream)) => {
+            Ok(upstream) => {
+                // Replace the placeholder (MTU=0) with the resolved upstream.
+                // All downstream consumers (reactor, future rule reloads) now
+                // have real link + effective MTUs to work with.
+                let (link, eff, mss) =
+                    (upstream.link_mtu, upstream.effective_mtu, upstream.mss_v4());
                 if let Some(ref mut session) = self.session {
-                    session.original_mtu = original_mtu;
-                    // Replace the placeholder (MTU=0) with the value the
-                    // spawn detected. All downstream consumers (reactor,
-                    // future rule reloads) now have a real MTU to work with.
                     session.upstream = upstream;
                 }
-                if let Some(orig) = original_mtu {
-                    self.log_info(format!("LAN MTU applied (was <{orig}>, restored on stop)"));
+                if eff < link {
+                    self.log_info(format!(
+                        "Tunnel path MTU <{eff}> (link <{link}>) → clamping MSS to <{mss}>"
+                    ));
+                } else {
+                    self.log_info(format!("Tunnel MTU <{eff}> → clamping MSS to <{mss}>"));
                 }
                 let lan_ip_display = self
                     .session
@@ -316,8 +321,11 @@ impl App {
                     .map(|s| s.upstream.name.clone())
                     .unwrap_or_default();
                 self.log_success(format!(
-                    "Reloaded rules: <{}> → <{}> (MTU <{}>)",
-                    old_name, upstream.name, upstream.mtu
+                    "Reloaded rules: <{}> → <{}> (MTU <{}>, MSS <{}>)",
+                    old_name,
+                    upstream.name,
+                    upstream.effective_mtu,
+                    upstream.mss_v4()
                 ));
                 if let Some(ref mut session) = self.session {
                     session.upstream = upstream;
