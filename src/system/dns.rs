@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::system::run_cmd;
 
-/// Discover DNS servers associated with a VPN interface.
+/// Discover DNS servers associated with a network interface.
 ///
 /// Parses `scutil --dns` output to find resolver configurations
 /// that are associated with the given VPN interface.

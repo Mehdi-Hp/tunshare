@@ -229,4 +229,17 @@ mod tests {
         assert!(config.contains("dhcp-option=3,192.168.2.1"));
         assert!(config.contains("dhcp-option=6,10.8.0.1"));
     }
+
+    #[test]
+    fn generate_config_advertises_lan_ip_as_dns() {
+        // Sharing always captures DNS on the Mac; DHCP option 6 is the LAN IP.
+        let server = DhcpServer::new(
+            "en8",
+            Ipv4Addr::new(192, 168, 2, 1),
+            vec!["192.168.2.1".to_string()],
+        );
+        let config = server.generate_config();
+        assert!(config.contains("dhcp-option=6,192.168.2.1"));
+        assert!(config.contains("port=0"));
+    }
 }

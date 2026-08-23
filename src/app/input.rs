@@ -38,6 +38,7 @@ impl App {
             AppState::Doctor => self.handle_doctor_key(key),
             AppState::InstallDnsmasq => self.handle_install_dnsmasq_key(key),
             AppState::PreflightBlocked => self.handle_preflight_key(key),
+            AppState::ViewingLists => self.handle_lists_key(key),
         }
     }
 
@@ -77,6 +78,7 @@ impl App {
                         MenuItem::ToggleNatPmp => self.toggle_natpmp_preference(),
                         MenuItem::SetDns => self.start_dns_edit(),
                         MenuItem::SetMtu => self.start_mtu_edit(),
+                        MenuItem::ViewLists => self.open_lists(),
                         MenuItem::RunDoctor => self.start_doctor(),
                         MenuItem::Quit => self.quit(),
                     }
@@ -96,6 +98,7 @@ impl App {
             },
             KeyCode::Char('q') => self.quit(),
             KeyCode::Char('d') if self.is_sharing() => self.toggle_debug(),
+            KeyCode::Char('l') if self.is_sharing() => self.open_lists(),
             KeyCode::Char('l') => self.logs_expanded = !self.logs_expanded,
             _ => {}
         }
@@ -202,7 +205,7 @@ impl App {
                 self.stop_sharing_async();
             }
             KeyCode::Char('d') => self.toggle_debug(),
-            KeyCode::Char('l') => self.logs_expanded = !self.logs_expanded,
+            KeyCode::Char('l') => self.open_lists(),
             KeyCode::Esc => {
                 if self.show_debug {
                     self.show_debug = false;
@@ -508,6 +511,84 @@ impl App {
             KeyCode::Esc => self.state = AppState::Menu,
             _ => {}
         }
+    }
+
+    fn open_lists(&mut self) {
+        self.lists_ui.return_state = if self.is_sharing() {
+            AppState::Active
+        } else {
+            AppState::Menu
+        };
+        self.lists_ui.selected = 0;
+        self.state = AppState::ViewingLists;
+        if self.lists_ui.block_count == 0 && self.lists_ui.allow_count == 0 {
+            self.refresh_lists_async(false);
+        }
+    }
+
+    fn handle_lists_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') if self.lists_ui.selected > 0 => {
+                self.lists_ui.selected -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.lists_ui.selected < 1 => {
+                self.lists_ui.selected += 1;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected_list(),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.refresh_lists_async(self.is_sharing());
+            }
+            KeyCode::Esc => {
+                self.state = self.lists_ui.return_state;
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_selected_list(&mut self) {
+        let turning_on_allow = self.lists_ui.selected == 1 && !self.lists.allow.enabled;
+        if turning_on_allow && self.is_sharing() {
+            self.enable_allowlist_live();
+            return;
+        }
+        if self.lists_ui.selected == 0 {
+            self.lists.block.enabled = !self.lists.block.enabled;
+            let state = if self.lists.block.enabled {
+                "on"
+            } else {
+                "off"
+            };
+            self.log_info(format!("Blocklist {state}"));
+            self.save_preferences();
+            if self.is_sharing() {
+                self.push_lists_to_resolver(None, None);
+            }
+            return;
+        }
+        self.lists.allow.enabled = false;
+        self.log_info("Allowlist off");
+        self.save_preferences();
+        if self.is_sharing() {
+            self.reload_firewall_without_bypass_async();
+        }
+    }
+
+    fn enable_allowlist_live(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Some(wan) = session.wan.clone() {
+            if let Some(server) = session.dns_server() {
+                if let Err(error) = server.attach_wan(wan.ip) {
+                    self.log_error(format!("WAN DNS attach failed: {error}"));
+                    return;
+                }
+            }
+            self.reload_firewall_for_bypass_async(wan);
+            return;
+        }
+        let exclude = vec![session.upstream.name.clone(), session.lan_name.clone()];
+        self.detect_wan_async(exclude);
     }
 
     fn toggle_natpmp_preference(&mut self) {

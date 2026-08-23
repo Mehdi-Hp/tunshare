@@ -29,16 +29,19 @@ Release builds are produced by CI for distribution. For ad-hoc optimized testing
 - **`src/error.rs`** - Error types using thiserror
 
 **`src/system/`** - macOS system interactions:
-- `firewall.rs` - pf firewall NAT rules (load/cleanup)
+- `firewall.rs` - pf firewall NAT rules, DNS `rdr`, optional WAN bypass table
 - `sysctl.rs` - IP forwarding via sysctl
-- `network.rs` - Interface detection (VPN vs LAN)
+- `network.rs` - Interface detection (VPN vs LAN vs WAN uplink)
 - `dns.rs` - DNS server discovery
-- `dhcp.rs` - dnsmasq DHCP server management
+- `dhcp.rs` - dnsmasq DHCP server management (DHCP only; DNS is in-process)
 - `natpmp.rs` - Native NAT-PMP server (RFC 6886) for automatic port mapping, replaces external miniupnpd
+- `lists.rs` - block/allow list fetch, cache, suffix match
+- `resolver.rs` - LAN `:53` DNS server (hickory)
 
 **`src/ui/`** - TUI components using ratatui:
 - `main_menu.rs` - Main menu and connection info
 - `interface_select.rs` - VPN/LAN interface selection
+- `lists.rs` - Blocklist / allowlist screen
 - `status.rs` - Log panel and loading indicators
 - `debug.rs` - Debug overlay panel
 - `theme.rs` - Color scheme
@@ -47,8 +50,8 @@ Release builds are produced by CI for distribution. For ad-hoc optimized testing
 ### Key Patterns
 
 - **Async operations**: System calls run in tokio tasks, results sent via `mpsc::UnboundedChannel<AsyncOpResult>` and polled in main loop
-- **State machine**: `AppState` enum (Menu → SelectingVpn → SelectingLan → Active, plus EditingDns for custom DNS input)
-- **Cleanup on drop**: `App::drop()` ensures NAT-PMP, firewall, and DHCP cleanup even on panic (NAT-PMP stops first so pf anchor flush works)
+- **State machine**: `AppState` enum (Menu → SelectingVpn → SelectingLan → Active, plus EditingDns / ViewingLists)
+- **Cleanup on drop**: `App::drop()` ensures resolver, NAT-PMP, firewall, and DHCP cleanup even on panic (resolver first so `:53` is free; NAT-PMP next so pf restore works)
 
 ## Requirements
 

@@ -4,6 +4,7 @@ pub mod debug;
 pub mod doctor;
 pub mod install_modal;
 pub mod interface_select;
+pub mod lists;
 pub mod main_menu;
 pub mod preflight_modal;
 pub mod status;

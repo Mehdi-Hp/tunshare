@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::doctor::{CheckStatus, CheckSummary};
 use crate::error::Result;
 use crate::health::{HealthStatus, VpnDropStrategy};
-use crate::system::{Firewall, InterfaceInfo, IpForwarding, NatPmpServer};
+use crate::system::{DnsServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer, WanUplink};
 
 use super::async_ops::{
     AsyncOpResult, DebugInfo, PendingOp, HEALTH_CHECK_INTERVAL, HEALTH_RECHECK_DEGRADED,
@@ -35,9 +35,34 @@ impl App {
             } => self.on_dns_discovered(vpn_servers, system_servers),
             AsyncOpResult::SharingStarted {
                 result,
+                wan,
                 firewall,
                 ip_forwarding,
-            } => self.on_sharing_started(result, firewall, ip_forwarding),
+            } => self.on_sharing_started(result, wan, firewall, ip_forwarding),
+            AsyncOpResult::ResolverStarted {
+                result,
+                block_count,
+                allow_count,
+                block_fetched,
+                allow_fetched,
+            } => self.on_resolver_started(
+                result,
+                block_count,
+                allow_count,
+                block_fetched,
+                allow_fetched,
+            ),
+            AsyncOpResult::ListsRefreshed {
+                block,
+                allow,
+                apply,
+            } => self.on_lists_refreshed(block, allow, apply),
+            AsyncOpResult::FirewallReloaded {
+                result,
+                firewall,
+                allowlist_on,
+            } => self.on_firewall_reloaded(result, firewall, allowlist_on),
+            AsyncOpResult::WanDetected { result } => self.on_wan_detected(result),
             AsyncOpResult::DhcpStarted { result } => self.on_dhcp_started(result),
             AsyncOpResult::NatPmpStarted { result, server } => {
                 self.on_natpmp_started(result, server)
@@ -93,8 +118,25 @@ impl App {
                     AsyncOpResult::DnsmasqInstalled { .. },
                     Some(PendingOp::InstallingDnsmasq)
                 )
+                | (
+                    AsyncOpResult::ResolverStarted { .. },
+                    Some(PendingOp::StartingResolver)
+                )
+                | (
+                    AsyncOpResult::ListsRefreshed { .. },
+                    Some(PendingOp::RefreshingLists)
+                )
+                | (
+                    AsyncOpResult::FirewallReloaded { .. },
+                    Some(PendingOp::ReloadingFirewall)
+                )
+                | (
+                    AsyncOpResult::WanDetected { .. },
+                    Some(PendingOp::DetectingWan)
+                )
                 // Reload also carries the firewall — always accept.
                 | (AsyncOpResult::UpstreamReloaded { .. }, _)
+                | (AsyncOpResult::FirewallReloaded { .. }, _)
         )
     }
 
@@ -111,7 +153,10 @@ impl App {
         match op {
             PendingOp::DetectingInterfaces => self.state = AppState::Menu,
             PendingOp::DiscoveringDns => self.state = AppState::SelectingVpn,
-            PendingOp::StartingSharing | PendingOp::StartingDhcp | PendingOp::StartingNatPmp => {
+            PendingOp::StartingSharing
+            | PendingOp::StartingDhcp
+            | PendingOp::StartingNatPmp
+            | PendingOp::StartingResolver => {
                 self.state = AppState::Menu;
             }
             // Stop runs to completion; SharingStopped always restores managers.
@@ -126,7 +171,8 @@ impl App {
             // half-cancelled modal.
             PendingOp::InstallingDnsmasq => self.state = AppState::Menu,
             // Reload runs to completion; result restores firewall ownership.
-            PendingOp::ReloadingUpstream => {}
+            PendingOp::ReloadingUpstream | PendingOp::ReloadingFirewall => {}
+            PendingOp::RefreshingLists | PendingOp::DetectingWan => {}
         }
     }
 
@@ -227,6 +273,7 @@ impl App {
     fn on_sharing_started(
         &mut self,
         result: Result<crate::session::ActiveUpstream>,
+        wan: Option<WanUplink>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     ) {
@@ -250,6 +297,10 @@ impl App {
                     (upstream.link_mtu, upstream.effective_mtu, upstream.mss_v4());
                 if let Some(ref mut session) = self.session {
                     session.upstream = upstream;
+                    session.wan = wan;
+                }
+                if let Some(wan) = self.session.as_ref().and_then(|s| s.wan.as_ref()) {
+                    self.log_info(format!("WAN uplink <{}> via <{}>", wan.iface, wan.gateway));
                 }
                 if eff < link {
                     self.log_info(format!(
@@ -264,26 +315,7 @@ impl App {
                     .map(|s| s.lan_ip.to_string())
                     .unwrap_or_else(|| "unknown".into());
                 self.log_success(format!("VPN sharing active! Gateway: {}", lan_ip_display));
-
-                if self.dhcp_enabled && self.dnsmasq_installed {
-                    if let Some(session) = self.session.as_ref() {
-                        let lan_name = session.lan_name.clone();
-                        let lan_ip = session.lan_ip;
-                        self.start_dhcp_async(lan_name, lan_ip);
-                        return;
-                    }
-                } else if !self.dhcp_enabled {
-                    self.log_info("DHCP disabled by user preference");
-                    self.log_manual_router_config();
-                } else {
-                    self.log_info("DHCP disabled (dnsmasq not installed)");
-                    self.log_manual_router_config();
-                }
-
-                if self.maybe_start_natpmp() {
-                    return;
-                }
-                self.finish_startup();
+                self.maybe_start_resolver();
             }
             Err(e) => {
                 self.log_error(format!("Failed to start sharing: {}", e));
@@ -292,6 +324,177 @@ impl App {
                 self.session = None;
             }
         }
+    }
+
+    fn on_resolver_started(
+        &mut self,
+        result: Result<DnsServer>,
+        block_count: usize,
+        allow_count: usize,
+        block_fetched: Option<std::time::SystemTime>,
+        allow_fetched: Option<std::time::SystemTime>,
+    ) {
+        self.lists_ui.block_count = block_count;
+        self.lists_ui.allow_count = allow_count;
+        self.lists_ui.block_fetched = block_fetched;
+        self.lists_ui.allow_fetched = allow_fetched;
+
+        match result {
+            Ok(server) => {
+                if let Some(ref mut session) = self.session {
+                    session.set_dns_server(Some(server));
+                }
+                self.log_success(format!(
+                    "LAN resolver on :53 (block {block_count}, allow {allow_count})"
+                ));
+                self.continue_after_resolver();
+            }
+            Err(error) => {
+                self.log_error(format!("DNS resolver failed: {error}"));
+                self.clear_pending_op();
+                self.state = AppState::Menu;
+                self.session = None;
+            }
+        }
+    }
+
+    fn continue_after_resolver(&mut self) {
+        if self.dhcp_enabled && self.dnsmasq_installed {
+            if let Some(session) = self.session.as_ref() {
+                let lan_name = session.lan_name.clone();
+                let lan_ip = session.lan_ip;
+                self.start_dhcp_async(lan_name, lan_ip);
+                return;
+            }
+        } else if !self.dhcp_enabled {
+            self.log_info("DHCP disabled by user preference");
+            self.log_manual_router_config();
+        } else {
+            self.log_info("DHCP disabled (dnsmasq not installed)");
+            self.log_manual_router_config();
+        }
+
+        if self.maybe_start_natpmp() {
+            return;
+        }
+        self.finish_startup();
+    }
+
+    fn on_lists_refreshed(
+        &mut self,
+        block: crate::system::LoadedList,
+        allow: crate::system::LoadedList,
+        apply: bool,
+    ) {
+        self.clear_pending_op();
+        for error in block.errors.iter().chain(allow.errors.iter()) {
+            self.log_warning(format!("List fetch: {error}"));
+        }
+        if block.used_stale || allow.used_stale {
+            self.log_warning("Using stale cached lists");
+        }
+        self.lists_ui.block_count = block.set.len();
+        self.lists_ui.allow_count = allow.set.len();
+        self.lists_ui.block_fetched = block.last_fetch;
+        self.lists_ui.allow_fetched = allow.last_fetch;
+        self.log_info(format!(
+            "Lists: block {} · allow {}",
+            block.set.len(),
+            allow.set.len()
+        ));
+        if apply {
+            self.push_lists_to_resolver(Some(&block.set), Some(&allow.set));
+        }
+    }
+
+    fn on_firewall_reloaded(&mut self, result: Result<()>, firewall: Firewall, allowlist_on: bool) {
+        if let Some(ref mut session) = self.session {
+            let (_dummy, ip_forwarding) = session.take_managers();
+            session.restore_managers(firewall, ip_forwarding);
+        }
+        self.clear_pending_op();
+        match result {
+            Ok(()) => {
+                if allowlist_on {
+                    let wan_ip = self
+                        .session
+                        .as_ref()
+                        .and_then(|s| s.wan.as_ref().map(|w| w.ip));
+                    if let Some(wan_ip) = wan_ip {
+                        if let Some(server) = self.session.as_ref().and_then(|s| s.dns_server()) {
+                            if let Err(error) = server.attach_wan(wan_ip) {
+                                self.log_error(format!("WAN DNS attach failed: {error}"));
+                                self.lists.allow.enabled = false;
+                                self.save_preferences();
+                                return;
+                            }
+                        }
+                    }
+                    self.lists.allow.enabled = true;
+                    self.save_preferences();
+                    self.push_lists_to_resolver(None, None);
+                    self.log_info("Allowlist on");
+                } else {
+                    self.log_info("Firewall rules reloaded without WAN bypass");
+                    self.push_lists_to_resolver(None, None);
+                }
+            }
+            Err(error) => {
+                self.log_error(format!("Firewall reload failed: {error}"));
+                self.lists.allow.enabled = false;
+                self.save_preferences();
+            }
+        }
+    }
+
+    fn on_wan_detected(&mut self, result: Result<Option<WanUplink>>) {
+        self.clear_pending_op();
+        match result {
+            Ok(Some(wan)) => {
+                self.log_info(format!("WAN uplink <{}> via <{}>", wan.iface, wan.gateway));
+                if let Some(ref mut session) = self.session {
+                    session.wan = Some(wan.clone());
+                }
+                self.reload_firewall_for_bypass_async(wan);
+            }
+            Ok(None) => {
+                self.log_error(
+                    "No WAN uplink found — allowlist needs an ifscoped default besides LAN/VPN",
+                );
+            }
+            Err(error) => {
+                self.log_error(format!("WAN detect failed: {error}"));
+            }
+        }
+    }
+
+    pub(super) fn push_lists_to_resolver(
+        &self,
+        block: Option<&crate::system::DomainSet>,
+        allow: Option<&crate::system::DomainSet>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(server) = session.dns_server() else {
+            return;
+        };
+        let lists = server.lists();
+        let block_enabled = self.lists.block.enabled;
+        let allow_enabled = self.lists.allow.enabled;
+        let block = block.cloned();
+        let allow = allow.cloned();
+        tokio::spawn(async move {
+            let mut current = lists.write().await;
+            if let Some(set) = block {
+                current.block = set;
+            }
+            if let Some(set) = allow {
+                current.allow = set;
+            }
+            current.block_enabled = block_enabled;
+            current.allow_enabled = allow_enabled;
+        });
     }
 
     /// Restore the firewall + NAT-PMP handle handed back by
@@ -604,15 +807,14 @@ impl App {
     /// need to configure your router by hand" hint. Pulled out so they
     /// stay in lockstep.
     fn log_manual_router_config(&mut self) {
-        let eff = self.dns.effective();
-        if eff.is_empty() {
-            self.log_info("Router needs manual IP configuration");
-        } else {
-            self.log_info(format!(
-                "Configure router manually - DNS: {}",
-                eff.join(", ")
-            ));
-        }
+        let dns = self
+            .session
+            .as_ref()
+            .map(|s| s.lan_ip.to_string())
+            .unwrap_or_else(|| "this Mac".into());
+        self.log_info(format!(
+            "Configure router manually — gateway + DNS {dns} (port 53 is redirected anyway)"
+        ));
     }
 
     /// True if the doctor's most recent run flagged a stale pf anchor.

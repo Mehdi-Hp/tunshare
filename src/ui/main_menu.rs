@@ -105,6 +105,7 @@ pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
             | MenuItem::ToggleNatPmp
             | MenuItem::SetDns
             | MenuItem::SetMtu
+            | MenuItem::ViewLists
             | MenuItem::RunDoctor => group_settings.push((i, item)),
             MenuItem::Quit => group_quit.push((i, item)),
         }
@@ -313,8 +314,8 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
         MenuItem::SetDns => (
             "DNS Server",
             vec![
-                "Pick the DNS pushed to LAN clients.",
-                "Auto-detect uses your VPN's DNS.",
+                "VPN-path resolver behind this Mac.",
+                "LAN clients always query tunshare :53.",
             ],
         ),
         MenuItem::SetMtu => (
@@ -323,6 +324,14 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
                 "Sets the MSS clamp for shared traffic.",
                 "Auto measures the real path MTU; pin a",
                 "value if you know your tunnel's MTU.",
+            ],
+        ),
+        MenuItem::ViewLists => (
+            "Lists",
+            vec![
+                "Block ads at DNS. Allowlist sends those",
+                "domains out the WAN, around the VPN.",
+                "Both off by default. Live while sharing.",
             ],
         ),
         MenuItem::RunDoctor => (
@@ -443,6 +452,7 @@ fn menu_item_label_str(item: &MenuItem) -> &'static str {
         MenuItem::ToggleNatPmp => "NAT-PMP Server",
         MenuItem::SetDns => "DNS Server",
         MenuItem::SetMtu => "Tunnel MTU",
+        MenuItem::ViewLists => "Lists",
         MenuItem::RunDoctor => "Run Doctor",
         MenuItem::Quit => "Quit",
     }
@@ -490,6 +500,18 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
             "Tunnel MTU".to_string(),
             Some(StatusBadge::Value(app.mtu.active_label())),
         ),
+        MenuItem::ViewLists => {
+            let badge = match (app.lists.block.enabled, app.lists.allow.enabled) {
+                (true, true) => "block+allow",
+                (true, false) => "block",
+                (false, true) => "allow",
+                (false, false) => "off",
+            };
+            (
+                "Lists".to_string(),
+                Some(StatusBadge::Value(badge.to_string())),
+            )
+        }
         MenuItem::RunDoctor => ("Run Doctor".to_string(), None),
         MenuItem::Quit => ("Quit".to_string(), None),
     }

@@ -16,6 +16,12 @@ pub enum TunshareError {
     #[error("Firewall error: {0}")]
     FirewallError(String),
 
+    #[error("List fetch/parse error: {0}")]
+    Lists(String),
+
+    #[error("DNS resolver error: {0}")]
+    Resolver(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

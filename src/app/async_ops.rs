@@ -12,9 +12,10 @@ use crate::doctor::{self, CheckResult};
 use crate::error::{Result, TunshareError};
 use crate::health::{self, HealthStatus};
 use crate::system::{
-    brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, discover_vpn_dns,
-    dns::get_default_dns, read_interface_bytes, DhcpServer, Firewall, InterfaceBytes,
-    InterfaceInfo, IpForwarding, NatPmpServer,
+    brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, detect_wan_uplink,
+    discover_vpn_dns, dns::get_default_dns, load_list, read_interface_bytes, BypassConfig,
+    DhcpServer, DnsServer, Firewall, InterfaceBytes, InterfaceInfo, IpForwarding, NatPmpServer,
+    ResolverLists, WanUplink,
 };
 
 use super::App;
@@ -26,7 +27,9 @@ use super::App;
 pub(super) const TIMEOUT_RELOAD_UPSTREAM: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_INTERFACES: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_DNS: Duration = Duration::from_secs(5);
-pub(super) const TIMEOUT_START_SHARING: Duration = Duration::from_secs(10);
+pub(super) const TIMEOUT_START_SHARING: Duration = Duration::from_secs(15);
+pub(super) const TIMEOUT_START_RESOLVER: Duration = Duration::from_secs(90);
+pub(super) const TIMEOUT_LISTS: Duration = Duration::from_secs(90);
 pub(super) const TIMEOUT_START_DHCP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
@@ -77,8 +80,29 @@ pub enum AsyncOpResult {
         /// clamp MTU) so the session can adopt it — the session is constructed
         /// with a placeholder (MTU=0) until this lands.
         result: Result<crate::session::ActiveUpstream>,
+        wan: Option<WanUplink>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
+    },
+    ResolverStarted {
+        result: Result<DnsServer>,
+        block_count: usize,
+        allow_count: usize,
+        block_fetched: Option<std::time::SystemTime>,
+        allow_fetched: Option<std::time::SystemTime>,
+    },
+    ListsRefreshed {
+        block: crate::system::LoadedList,
+        allow: crate::system::LoadedList,
+        apply: bool,
+    },
+    FirewallReloaded {
+        result: Result<()>,
+        firewall: Firewall,
+        allowlist_on: bool,
+    },
+    WanDetected {
+        result: Result<Option<WanUplink>>,
     },
     DhcpStarted {
         result: Result<()>,
@@ -148,6 +172,10 @@ pub enum PendingOp {
     FlushingStaleAnchor,
     InstallingDnsmasq,
     ReloadingUpstream,
+    StartingResolver,
+    RefreshingLists,
+    ReloadingFirewall,
+    DetectingWan,
 }
 
 impl PendingOp {
@@ -164,6 +192,10 @@ impl PendingOp {
             PendingOp::FlushingStaleAnchor => "Flushing stale pf anchor...",
             PendingOp::InstallingDnsmasq => "Installing dnsmasq via Homebrew...",
             PendingOp::ReloadingUpstream => "Reloading rules for new VPN interface...",
+            PendingOp::StartingResolver => "Starting DNS resolver...",
+            PendingOp::RefreshingLists => "Refreshing domain lists...",
+            PendingOp::ReloadingFirewall => "Reloading firewall rules...",
+            PendingOp::DetectingWan => "Looking for a WAN uplink...",
         }
     }
 }
@@ -283,48 +315,82 @@ impl App {
         self.session = Some(session);
 
         let mtu_policy = self.mtu.active;
+        let allowlist_on = self.lists.allow.enabled;
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            let result =
-                timeout(TIMEOUT_START_SHARING, async {
-                    ip_forwarding.enable().await?;
+            let result = timeout(TIMEOUT_START_SHARING, async {
+                ip_forwarding.enable().await?;
 
-                    // Resolve the upstream first (link MTU + the effective clamp
-                    // MTU, which under `Auto` runs the path-MTU probe) so the pf
-                    // scrub `max-mss` reflects the real path, not the tunnel's
-                    // inflated interface MTU.
-                    let upstream =
-                        match crate::session::ActiveUpstream::detect(vpn_name.clone(), mtu_policy)
-                            .await
-                        {
-                            Ok(u) => u,
-                            Err(e) => {
-                                let _ = ip_forwarding.restore().await;
-                                return Err(e);
-                            }
-                        };
+                let wan = if allowlist_on {
+                    let exclude = vec![vpn_name.clone(), lan_name.clone()];
+                    match detect_wan_uplink(&exclude).await {
+                        Ok(Some(uplink)) => Some(uplink),
+                        Ok(None) => {
+                            let _ = ip_forwarding.restore().await;
+                            return Err(TunshareError::FirewallError(
+                                "allowlist is on but no WAN uplink was found (need an ifscoped default besides LAN/VPN)".into(),
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = ip_forwarding.restore().await;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    None
+                };
 
-                    if let Err(e) = firewall
-                        .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
+                // Resolve the upstream first (link MTU + the effective clamp
+                // MTU, which under `Auto` runs the path-MTU probe) so the pf
+                // scrub `max-mss` reflects the real path, not the tunnel's
+                // inflated interface MTU.
+                let upstream =
+                    match crate::session::ActiveUpstream::detect(vpn_name.clone(), mtu_policy)
                         .await
                     {
-                        let _ = ip_forwarding.restore().await;
-                        return Err(e);
-                    }
+                        Ok(u) => u,
+                        Err(e) => {
+                            let _ = ip_forwarding.restore().await;
+                            return Err(e);
+                        }
+                    };
 
-                    Ok(upstream)
-                })
-                .await;
+                let bypass = wan.as_ref().map(|w| BypassConfig {
+                    wan_if: w.iface.clone(),
+                    wan_gw: w.gateway,
+                });
+                if let Err(e) = firewall
+                    .load_rules(
+                        &upstream.name,
+                        &lan_name,
+                        lan_ip,
+                        upstream.mss_v4(),
+                        bypass.as_ref(),
+                    )
+                    .await
+                {
+                    let _ = ip_forwarding.restore().await;
+                    return Err(e);
+                }
 
-            let result = match result {
-                Ok(inner) => inner,
-                Err(_) => Err(TunshareError::FirewallError(
-                    "starting sharing timed out".into(),
-                )),
+                Ok((upstream, wan))
+            })
+            .await;
+
+            let (result, wan) = match result {
+                Ok(Ok((upstream, wan))) => (Ok(upstream), wan),
+                Ok(Err(error)) => (Err(error), None),
+                Err(_) => (
+                    Err(TunshareError::FirewallError(
+                        "starting sharing timed out".into(),
+                    )),
+                    None,
+                ),
             };
 
             let _ = tx.send(AsyncOpResult::SharingStarted {
                 result,
+                wan,
                 firewall,
                 ip_forwarding,
             });
@@ -341,7 +407,7 @@ impl App {
         }
 
         let tx = self.op_tx.clone();
-        let dns_servers = self.dns.effective();
+        let dns_servers = vec![lan_ip.to_string()];
 
         tokio::spawn(async move {
             let result = timeout(TIMEOUT_START_DHCP, async {
@@ -412,6 +478,7 @@ impl App {
 
         // Signal NAT-PMP server to shut down before spawning the cleanup task.
         session.shutdown_natpmp();
+        session.shutdown_dns();
 
         let (mut firewall, mut ip_forwarding) = session.take_managers();
         let tx = self.op_tx.clone();
@@ -573,6 +640,7 @@ impl App {
         session.restore_managers(Firewall::default(), ip_forwarding);
         let lan_name = session.lan_name.clone();
         let lan_ip = session.lan_ip;
+        let session_wan = session.wan.clone();
         let natpmp_was_active = session.natpmp_active;
         if natpmp_was_active {
             // Stop the old server now so the spawn can spin up a fresh
@@ -587,8 +655,18 @@ impl App {
                 // protocol means a different path MTU, so the probe re-runs
                 // and the clamp tracks the swap.
                 let upstream = crate::session::ActiveUpstream::detect(new_name, mtu_policy).await?;
+                let bypass = session_wan.as_ref().map(|w| BypassConfig {
+                    wan_if: w.iface.clone(),
+                    wan_gw: w.gateway,
+                });
                 firewall
-                    .load_rules(&upstream.name, &lan_name, upstream.mss_v4())
+                    .load_rules(
+                        &upstream.name,
+                        &lan_name,
+                        lan_ip,
+                        upstream.mss_v4(),
+                        bypass.as_ref(),
+                    )
                     .await?;
                 Ok::<_, TunshareError>(upstream)
             })
@@ -792,6 +870,173 @@ impl App {
         // Take the first traffic sample right away so the sparkline starts
         // populating instead of staying blank for the first second.
         self.next_traffic_sample = Some(Instant::now());
+    }
+
+    /// Kick off NAT-PMP startup if enabled. Returns true if a spawn was
+    /// issued (caller should return early to let the result drive the next
+    /// step), false if the caller should proceed to `finish_startup`.
+    pub(super) fn maybe_start_resolver(&mut self) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let lan_ip = session.lan_ip;
+        let wan_ip = session.wan.as_ref().map(|w| w.ip);
+        let vpn_dns = self.dns.effective();
+        let wan_dns = if self.dns.system_servers.is_empty() {
+            vec!["1.1.1.1".to_string()]
+        } else {
+            self.dns.system_servers.clone()
+        };
+        let block_setting = self.lists.block.clone();
+        let allow_setting = self.lists.allow.clone();
+        self.set_pending_op(PendingOp::StartingResolver);
+        self.log_info("Starting LAN DNS resolver...");
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = timeout(TIMEOUT_START_RESOLVER, async {
+                let (block, allow) = tokio::join!(
+                    load_list(&block_setting, false),
+                    load_list(&allow_setting, false),
+                );
+                let lists = ResolverLists {
+                    block: if block_setting.enabled {
+                        block.set.clone()
+                    } else {
+                        Default::default()
+                    },
+                    allow: if allow_setting.enabled {
+                        allow.set.clone()
+                    } else {
+                        Default::default()
+                    },
+                    block_enabled: block_setting.enabled,
+                    allow_enabled: allow_setting.enabled,
+                };
+                let server = DnsServer::start(lan_ip, vpn_dns, wan_dns, wan_ip, lists).await?;
+                Ok((server, block, allow))
+            })
+            .await;
+            match result {
+                Ok(Ok((server, block, allow))) => {
+                    let _ = tx.send(AsyncOpResult::ResolverStarted {
+                        result: Ok(server),
+                        block_count: block.set.len(),
+                        allow_count: allow.set.len(),
+                        block_fetched: block.last_fetch,
+                        allow_fetched: allow.last_fetch,
+                    });
+                }
+                Ok(Err(error)) => {
+                    let _ = tx.send(AsyncOpResult::ResolverStarted {
+                        result: Err(error),
+                        block_count: 0,
+                        allow_count: 0,
+                        block_fetched: None,
+                        allow_fetched: None,
+                    });
+                }
+                Err(_) => {
+                    let _ = tx.send(AsyncOpResult::ResolverStarted {
+                        result: Err(timeout_err("start_resolver")),
+                        block_count: 0,
+                        allow_count: 0,
+                        block_fetched: None,
+                        allow_fetched: None,
+                    });
+                }
+            }
+        });
+        true
+    }
+
+    pub(super) fn refresh_lists_async(&mut self, apply: bool) {
+        if self.pending_op.is_some() {
+            return;
+        }
+        self.set_pending_op(PendingOp::RefreshingLists);
+        self.log_info("Refreshing domain lists...");
+        let block_setting = self.lists.block.clone();
+        let allow_setting = self.lists.allow.clone();
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = timeout(TIMEOUT_LISTS, async {
+                tokio::join!(
+                    load_list(&block_setting, true),
+                    load_list(&allow_setting, true),
+                )
+            })
+            .await;
+            let (block, allow) = result.unwrap_or_default();
+            let _ = tx.send(AsyncOpResult::ListsRefreshed {
+                block,
+                allow,
+                apply,
+            });
+        });
+    }
+
+    pub(super) fn detect_wan_async(&mut self, exclude: Vec<String>) {
+        if self.pending_op.is_some() {
+            return;
+        }
+        self.set_pending_op(PendingOp::DetectingWan);
+        self.log_info("Looking for a WAN uplink...");
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = timeout(TIMEOUT_INTERFACES, detect_wan_uplink(&exclude)).await;
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(timeout_err("detect_wan")),
+            };
+            let _ = tx.send(AsyncOpResult::WanDetected { result });
+        });
+    }
+
+    pub(super) fn reload_firewall_for_bypass_async(&mut self, wan: WanUplink) {
+        let bypass = Some(BypassConfig {
+            wan_if: wan.iface.clone(),
+            wan_gw: wan.gateway,
+        });
+        self.reload_firewall_async(bypass, true);
+    }
+
+    pub(super) fn reload_firewall_without_bypass_async(&mut self) {
+        self.reload_firewall_async(None, false);
+    }
+
+    fn reload_firewall_async(&mut self, bypass: Option<BypassConfig>, allowlist_on: bool) {
+        if self.pending_op.is_some() || self.session.is_none() {
+            return;
+        }
+        self.set_pending_op(PendingOp::ReloadingFirewall);
+        let session = self.session.as_mut().expect("checked above");
+        let (mut firewall, ip_forwarding) = session.take_managers();
+        session.restore_managers(Firewall::default(), ip_forwarding);
+        let vpn_name = session.upstream.name.clone();
+        let lan_name = session.lan_name.clone();
+        let lan_ip = session.lan_ip;
+        let mss = session.upstream.mss_v4();
+        let tx = self.op_tx.clone();
+        tokio::spawn(async move {
+            let result = timeout(TIMEOUT_RELOAD_UPSTREAM, async {
+                firewall
+                    .load_rules(&vpn_name, &lan_name, lan_ip, mss, bypass.as_ref())
+                    .await
+            })
+            .await;
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(timeout_err("reload_firewall")),
+            };
+            if !allowlist_on {
+                Firewall::table_flush();
+            }
+            let _ = tx.send(AsyncOpResult::FirewallReloaded {
+                result,
+                firewall,
+                allowlist_on,
+            });
+        });
     }
 
     /// Kick off NAT-PMP startup if enabled. Returns true if a spawn was

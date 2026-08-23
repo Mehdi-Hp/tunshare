@@ -136,6 +136,88 @@ fn is_wifi_port(description: Option<&str>) -> bool {
     }
 }
 
+/// WAN uplink used to send allowlisted traffic around the VPN.
+#[derive(Debug, Clone)]
+pub struct WanUplink {
+    pub iface: String,
+    pub ip: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+}
+
+/// Find an ifscoped default route that isn't the share LAN and isn't the VPN.
+///
+/// Prefers Wi-Fi (the usual uplink on a travel-router setup). `exclude` is
+/// typically the LAN iface plus any utun already selected as the VPN.
+pub async fn detect_wan_uplink(exclude: &[String]) -> Result<Option<WanUplink>> {
+    let ports_output = run_cmd("networksetup", &["-listallhardwareports"]).await?;
+    let ports_stdout = String::from_utf8_lossy(&ports_output.stdout);
+    let port_map = parse_hardware_ports(&ports_stdout);
+
+    let ifconfig_output = run_cmd("ifconfig", &["-a"]).await?;
+    let ifconfig_stdout = String::from_utf8_lossy(&ifconfig_output.stdout);
+    let interfaces = parse_interfaces(&ifconfig_stdout);
+
+    let mut wifi_hit: Option<WanUplink> = None;
+    let mut other_hit: Option<WanUplink> = None;
+
+    for iface in &interfaces {
+        if !iface.is_up || iface.ipv4_address.is_none() {
+            continue;
+        }
+        if iface.name.starts_with("lo") || iface.name.starts_with("utun") {
+            continue;
+        }
+        if exclude.iter().any(|n| n == &iface.name) {
+            continue;
+        }
+        let Some(uplink) = probe_ifscope_default(&iface.name, iface.ipv4_address).await? else {
+            continue;
+        };
+        let description = port_map.get(&iface.name).map(String::as_str);
+        if is_wifi_port(description) {
+            wifi_hit = Some(uplink);
+            break;
+        }
+        if other_hit.is_none() {
+            other_hit = Some(uplink);
+        }
+    }
+
+    Ok(wifi_hit.or(other_hit))
+}
+
+async fn probe_ifscope_default(iface: &str, ip: Option<Ipv4Addr>) -> Result<Option<WanUplink>> {
+    let ip = match ip {
+        Some(ip) => ip,
+        None => return Ok(None),
+    };
+    let output = run_cmd("route", &["-n", "get", "-ifscope", iface, "default"]).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(gateway) = parse_route_gateway(&stdout) else {
+        return Ok(None);
+    };
+    Ok(Some(WanUplink {
+        iface: iface.to_string(),
+        ip,
+        gateway,
+    }))
+}
+
+/// Extract the gateway from a `route -n get` block. The line looks like
+/// `    gateway: 192.168.1.1`.
+fn parse_route_gateway(output: &str) -> Option<Ipv4Addr> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("gateway:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
 /// Read the MTU of `iface` by parsing `ifconfig <iface>` output.
 ///
 /// The header line of `ifconfig <iface>` always carries `mtu <N>` as its
@@ -271,6 +353,25 @@ destination: default
     fn parse_default_route_returns_none_when_missing() {
         let output = "route to: default\nflags: <UP,GATEWAY>";
         assert_eq!(parse_default_route_interface(output), None);
+    }
+
+    #[test]
+    fn parse_route_gateway_extracts_ipv4() {
+        let output = "   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.1.1
+  interface: en0";
+        assert_eq!(
+            parse_route_gateway(output),
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        );
+    }
+
+    #[test]
+    fn parse_route_gateway_skips_link_local_text() {
+        // link#N is not an IPv4 next hop we can feed to pf route-to.
+        assert_eq!(parse_route_gateway("    gateway: link#8"), None);
     }
 
     #[test]

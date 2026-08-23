@@ -8,7 +8,8 @@ use crate::config::LanMtu;
 use crate::error::Result;
 use crate::health::HealthStatus;
 use crate::system::{
-    probe_path_mtu, read_mtu, DhcpServer, Firewall, IpForwarding, NatPmpServer, CONSERVATIVE_MTU,
+    probe_path_mtu, read_mtu, DhcpServer, DnsServer, Firewall, IpForwarding, NatPmpServer,
+    WanUplink, CONSERVATIVE_MTU,
 };
 
 /// IPv4 TCP/IP header overhead used to clamp MSS from MTU in the pf scrub rule.
@@ -93,6 +94,10 @@ pub struct SharingSession {
     pub lan_name: String,
     /// LAN gateway IP (e.g. 192.168.2.1).
     pub lan_ip: Ipv4Addr,
+    /// WAN uplink for allowlisted destinations. Required when the allowlist is on.
+    pub wan: Option<WanUplink>,
+    /// In-process LAN DNS server (always running while sharing).
+    dns_server: Option<DnsServer>,
 
     /// Whether the DHCP server is running.
     pub dhcp_active: bool,
@@ -127,6 +132,8 @@ impl SharingSession {
             upstream,
             lan_name,
             lan_ip,
+            wan: None,
+            dns_server: None,
             dhcp_active: false,
             dhcp_range: None,
             natpmp_active: false,
@@ -172,11 +179,34 @@ impl SharingSession {
     pub fn set_natpmp_server(&mut self, server: Option<NatPmpServer>) {
         self.natpmp_server = server;
     }
+
+    pub fn set_dns_server(&mut self, server: Option<DnsServer>) {
+        if let Some(ref existing) = self.dns_server {
+            existing.shutdown();
+        }
+        self.dns_server = server;
+    }
+
+    pub fn dns_server(&self) -> Option<&DnsServer> {
+        self.dns_server.as_ref()
+    }
+
+    pub fn shutdown_dns(&mut self) {
+        if let Some(ref server) = self.dns_server {
+            server.shutdown();
+        }
+        self.dns_server = None;
+    }
 }
 
 impl Drop for SharingSession {
     fn drop(&mut self) {
-        // NAT-PMP first (before firewall so pf anchor flush works)
+        // Resolver first so :53 is free before pf restore.
+        if let Some(ref server) = self.dns_server {
+            server.shutdown();
+        }
+
+        // NAT-PMP next (before firewall so pf anchor flush works)
         if self.natpmp_active {
             if let Some(ref server) = self.natpmp_server {
                 server.shutdown();

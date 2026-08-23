@@ -8,8 +8,10 @@
 use crate::error::Result;
 use crate::system::{detect_lan_interfaces, detect_vpn_interfaces, run_cmd, same_ipv4_network};
 
-/// pf anchor name we use for NAT rules. Matches the value embedded in
-/// `system::firewall::Firewall::generate_rules`.
+/// Stale-run leftover from older tunshare versions that used a named
+/// pfctl anchor. Current rules load via `pfctl -f` (rdr + NAT + optional
+/// WAN bypass), not this anchor. Doctor still flushes it so a crashed
+/// pre-rewrite run doesn't leave NAT behind.
 const PF_ANCHOR_NAME: &str = "vpn_share";
 
 /// Native NAT-PMP server port (RFC 6886).

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{Config, ListsConfig};
 use crate::health::{HealthStatus, VpnDropStrategy};
 use crate::session::SharingSession;
 use crate::system::{DhcpServer, InterfaceInfo};
@@ -80,6 +80,34 @@ pub struct App {
     /// (the default) routes to `Menu`; set when the user enters Doctor
     /// from a state we want to restore (e.g. `PreflightBlocked`).
     pub(super) doctor_return_state: Option<AppState>,
+    /// Block/allow list toggles and cached counts.
+    pub lists: ListsConfig,
+    pub lists_ui: ListsUi,
+}
+
+/// TUI snapshot for the Lists screen. Counts come from the last fetch.
+#[derive(Debug, Clone)]
+pub struct ListsUi {
+    pub selected: usize,
+    pub block_count: usize,
+    pub allow_count: usize,
+    pub block_fetched: Option<std::time::SystemTime>,
+    pub allow_fetched: Option<std::time::SystemTime>,
+    /// Where Esc should return (`Menu` or `Active`).
+    pub return_state: AppState,
+}
+
+impl Default for ListsUi {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            block_count: 0,
+            allow_count: 0,
+            block_fetched: None,
+            allow_fetched: None,
+            return_state: AppState::Menu,
+        }
+    }
 }
 
 impl App {
@@ -118,6 +146,11 @@ impl App {
             vpn_drop_strategy: config.vpn_drop_strategy,
             doctor: DoctorState::default(),
             doctor_return_state: None,
+            lists: config.lists.clone(),
+            lists_ui: ListsUi {
+                return_state: AppState::Menu,
+                ..ListsUi::default()
+            },
         };
 
         app.log_info("Ready. Press Enter to start VPN sharing.");
@@ -221,13 +254,13 @@ impl App {
 
         match self.state {
             AppState::Menu if self.is_sharing() => {
-                "↑/↓: Navigate  Enter: Select  d: Debug  l: Logs  q: Quit"
+                "↑/↓: Navigate  Enter: Select  d: Debug  l: Lists  q: Quit"
             }
             AppState::Menu => "↑/↓: Navigate  Enter: Select  l: Logs  q: Quit",
             AppState::SelectingVpn => "↑/↓: Navigate  Enter: Select  Esc: Cancel",
             AppState::SelectingLan => "↑/↓: Navigate  Enter: Select  ←: Back  Esc: Cancel",
             AppState::Active if self.show_debug => "d: Hide debug  s: Stop  l: Logs  q: Quit",
-            AppState::Active => "s: Stop  d: Debug  l: Logs  q: Quit",
+            AppState::Active => "s: Stop  d: Debug  l: Lists  q: Quit",
             AppState::Doctor if self.doctor_has_stale_anchor() => {
                 "↑/↓: Navigate  r: Re-run  c: Clean stale anchor  Esc: Back"
             }
@@ -235,6 +268,7 @@ impl App {
             AppState::InstallDnsmasq if self.brew_installed => "Enter: Install  Esc: Cancel",
             AppState::InstallDnsmasq => "Esc: Dismiss",
             AppState::PreflightBlocked => "r: Rescan  d: Doctor  Esc: Cancel",
+            AppState::ViewingLists => "↑/↓: Navigate  Enter: Toggle  r: Refresh  Esc: Back",
             AppState::EditingDns => match self.dns.edit_mode {
                 DnsEditMode::SelectingPreset if !self.dns.history.is_empty() => {
                     "↑/↓: Navigate  Enter: Select  x: Remove recent  Esc: Cancel"
@@ -260,6 +294,7 @@ impl App {
             dns_history: self.dns.history.clone(),
             vpn_drop_strategy: self.vpn_drop_strategy,
             lan_mtu: self.mtu.active,
+            lists: self.lists.clone(),
         }
         .save();
     }

@@ -244,6 +244,9 @@ async fn run_app() -> Result<()> {
                     render_main_menu(frame, chunks[2], &app);
                     ui::preflight_modal::render_preflight(frame, chunks[2], &app);
                 }
+                AppState::ViewingLists => {
+                    ui::lists::render_lists(frame, chunks[2], &app);
+                }
             }
 
             // Render loading indicator if operation is pending

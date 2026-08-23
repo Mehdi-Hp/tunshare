@@ -4,22 +4,26 @@ pub mod brew;
 pub mod dhcp;
 pub mod dns;
 pub mod firewall;
+pub mod lists;
 pub mod natpmp;
 pub mod network;
 pub mod pmtu;
+pub mod resolver;
 pub mod sysctl;
 pub mod traffic;
 
 pub use brew::brew_installed;
 pub use dhcp::DhcpServer;
 pub use dns::discover_vpn_dns;
-pub use firewall::Firewall;
+pub use firewall::{BypassConfig, Firewall};
+pub use lists::{load_list, DomainSet, LoadedList};
 pub use natpmp::NatPmpServer;
 pub use network::{
-    default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, read_mtu,
-    same_ipv4_network, InterfaceInfo,
+    default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, detect_wan_uplink,
+    read_mtu, same_ipv4_network, InterfaceInfo, WanUplink,
 };
 pub use pmtu::{probe_path_mtu, CONSERVATIVE_MTU};
+pub use resolver::{DnsServer, ResolverLists};
 pub use sysctl::IpForwarding;
 pub use traffic::{read_interface_bytes, InterfaceBytes};
 

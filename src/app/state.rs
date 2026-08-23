@@ -19,6 +19,8 @@ pub enum AppState {
     /// Modal shown after detection completes with at least one missing
     /// prerequisite (no VPN, no wired LAN, or both).
     PreflightBlocked,
+    /// Blocklist / allowlist toggles, counts, and refresh.
+    ViewingLists,
 }
 
 /// Menu items. The actual list shown depends on whether sharing is active —
@@ -31,6 +33,7 @@ pub enum MenuItem {
     ToggleNatPmp,
     SetDns,
     SetMtu,
+    ViewLists,
     RunDoctor,
     Quit,
 }
@@ -49,7 +52,7 @@ impl App {
     /// Menu items for the current sharing state.
     pub fn menu_items(&self) -> Vec<MenuItem> {
         if self.is_sharing() {
-            vec![MenuItem::StopSharing, MenuItem::Quit]
+            vec![MenuItem::StopSharing, MenuItem::ViewLists, MenuItem::Quit]
         } else {
             vec![
                 MenuItem::StartSharing,
@@ -57,6 +60,7 @@ impl App {
                 MenuItem::ToggleNatPmp,
                 MenuItem::SetDns,
                 MenuItem::SetMtu,
+                MenuItem::ViewLists,
                 MenuItem::RunDoctor,
                 MenuItem::Quit,
             ]
