@@ -6,7 +6,7 @@ use super::App;
 
 /// Stable DNS handed to LAN clients when the user hasn't set a custom one.
 /// Intentionally NOT the VPN's pushed resolver: that's a tunnel-internal IP
-/// (e.g. Windscribe's 10.255.255.1) which becomes unreachable the moment
+/// (e.g. a typical tunnel-internal 10.255.255.1) which becomes unreachable the moment
 /// the user switches VPN provider/protocol, silently breaking LAN DNS
 /// until tunshare is restarted. A public resolver works on every tunnel,
 /// and its queries still ride the active VPN via our NAT (so no leak).

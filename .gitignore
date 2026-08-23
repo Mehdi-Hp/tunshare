@@ -4,10 +4,14 @@
 .vscode/
 *.swp
 *.swo
-.claude/settings.local.json
 justfile.local
 
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
+
+# Local-only session artifacts
+.beads/scratch/
+.beads/interactions.jsonl
+.factory/settings.local.json

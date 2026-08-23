@@ -1,96 +1,86 @@
-# Agent Instructions
+# AGENTS.md
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+Project-level guidance for AI agents working in this repository.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+## Overview
 
-## Quick Reference
+tunshare is a Rust TUI application for macOS that routes internet traffic through a VPN and shares it via LAN. Uses macOS's `pf` (packet filter) firewall for NAT and optionally `dnsmasq` for DHCP.
+
+## Commands
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
+just build   # Build the debug binary
+just run     # Build and run with sudo (always rebuilds — no stale-binary trap)
+just lint    # Run clippy
+just test    # Run tests
+just fmt     # Format code
+just check   # Full pre-commit: fmt-check, lint, test, build
+just clean   # Clean build artifacts
 ```
 
-## Non-Interactive Shell Commands
+Release builds are produced by CI for distribution. For ad-hoc optimized testing, run `cargo build --release` directly.
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+## Architecture
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+### Module Structure
 
-**Use these forms instead:**
-```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
+- **`src/main.rs`** - Entry point, terminal setup, main event loop using tokio/crossterm
+- **`src/app.rs`** - Application state machine (Elm-style architecture) with async operation handling via mpsc channels
+- **`src/error.rs`** - Error types using thiserror
 
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
-```
+**`src/system/`** - macOS system interactions:
+- `firewall.rs` - pf firewall NAT rules (load/cleanup)
+- `sysctl.rs` - IP forwarding via sysctl
+- `network.rs` - Interface detection (VPN vs LAN)
+- `dns.rs` - DNS server discovery
+- `dhcp.rs` - dnsmasq DHCP server management
+- `natpmp.rs` - Native NAT-PMP server (RFC 6886) for automatic port mapping, replaces external miniupnpd
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+**`src/ui/`** - TUI components using ratatui:
+- `main_menu.rs` - Main menu and connection info
+- `interface_select.rs` - VPN/LAN interface selection
+- `status.rs` - Log panel and loading indicators
+- `debug.rs` - Debug overlay panel
+- `theme.rs` - Color scheme
+- `widgets/` - Reusable UI components (`card.rs` - Card widget)
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
-## Beads Issue Tracker
+### Key Patterns
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+- **Async operations**: System calls run in tokio tasks, results sent via `mpsc::UnboundedChannel<AsyncOpResult>` and polled in main loop
+- **State machine**: `AppState` enum (Menu → SelectingVpn → SelectingLan → Active, plus EditingDns for custom DNS input)
+- **Cleanup on drop**: `App::drop()` ensures NAT-PMP, firewall, and DHCP cleanup even on panic (NAT-PMP stops first so pf anchor flush works)
 
-### Quick Reference
+## Requirements
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
+- macOS (uses pf firewall and macOS-specific sysctl)
+- Must run as root (sudo)
+- Optional: `dnsmasq` for DHCP (`brew install dnsmasq`)
+
+
+## Issue tracking — beads (bd)
+
+This project uses [beads](https://github.com/steveyegge/beads) for all task tracking.
 
 ### Rules
+- `bd` is the source of truth for all work — never use markdown TODO lists, and never use TodoWrite/TaskCreate to *track* work that should live in `bd`.
+- File a `bd` issue **before** writing code; claim it (`bd update <id> --claim`) when you start.
+- Once a bead is claimed, use `TodoWrite` to break it into in-session sub-tasks (or load the breakdown from the bead's `--design`/`--notes` if it's already there). TodoWrite is for the *execution slice* of one bead; `bd` is for everything that outlives the session.
+- Before saying "done" at end of a session, close every completed issue: `bd close <id1> <id2> …`.
+- `.beads/issues.jsonl` is committable — include it in commits without asking.
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+### Commands
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Finding work**
+- `bd ready` — issues ready to work (no blockers)
+- `bd list --status=open` / `--status=in_progress`
+- `bd show <id>` — full issue with dependencies
 
-## Session Completion
+**Creating & updating**
+- `bd create --title="…" --description="…" --type=task|bug|feature|epic|chore --priority=2`
+  - Priority is `0`–`4` (0=critical, 2=medium, 4=backlog). Not "high"/"low".
+- `bd update <id> --claim` — atomic claim
+- `bd update <id> --title/--description/--notes/--design "…"` — edit fields inline
+- `bd close <id1> <id2> …` — close one or many; add `--reason="…"` if useful
+- ⚠ Never use `bd edit` — it opens `$EDITOR` and blocks the agent.
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
+`bd` also handles dependencies (`bd dep add`, `bd blocked`), deferring work (`bd defer`), and superseding issues (`bd supersede`). Run `bd --help` or `bd <command> --help` for syntax.
