@@ -745,7 +745,7 @@ impl App {
         };
         if let Some(wan) = session.wan.clone() {
             if let Some(server) = session.dns_server() {
-                if let Err(error) = server.attach_wan(wan.ip) {
+                if let Err(error) = server.attach_wan(&wan) {
                     self.log_error(format!("WAN DNS attach failed: {error}"));
                     return;
                 }

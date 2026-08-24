@@ -416,13 +416,10 @@ impl App {
         match result {
             Ok(()) => {
                 if allowlist_on {
-                    let wan_ip = self
-                        .session
-                        .as_ref()
-                        .and_then(|s| s.wan.as_ref().map(|w| w.ip));
-                    if let Some(wan_ip) = wan_ip {
+                    let wan = self.session.as_ref().and_then(|s| s.wan.clone());
+                    if let Some(wan) = wan {
                         if let Some(server) = self.session.as_ref().and_then(|s| s.dns_server()) {
-                            if let Err(error) = server.attach_wan(wan_ip) {
+                            if let Err(error) = server.attach_wan(&wan) {
                                 self.log_error(format!("WAN DNS attach failed: {error}"));
                                 self.lists.allow.enabled = false;
                                 self.save_preferences();

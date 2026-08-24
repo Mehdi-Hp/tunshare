@@ -1,5 +1,6 @@
 //! System interaction modules for network, firewall, DNS, DHCP, and sysctl operations.
 
+pub mod bound_if;
 pub mod brew;
 pub mod dhcp;
 pub mod dns;

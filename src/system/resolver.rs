@@ -21,8 +21,10 @@ use tokio::sync::{watch, RwLock};
 use tokio::time::interval;
 
 use crate::error::{Result, TunshareError};
+use crate::system::bound_if::BoundIfProvider;
 use crate::system::firewall::Firewall;
 use crate::system::lists::DomainSet;
+use crate::system::WanUplink;
 
 /// Flat pf-table lifetime. Real DNS TTLs are a later-bead nicety.
 const BYPASS_TTL: Duration = Duration::from_secs(3600);
@@ -41,7 +43,7 @@ pub struct ResolverLists {
 pub struct DnsServer {
     shutdown_tx: watch::Sender<bool>,
     lists: Arc<RwLock<ResolverLists>>,
-    wan_upstream: Arc<std::sync::RwLock<Option<Resolver<TokioRuntimeProvider>>>>,
+    wan_upstream: Arc<std::sync::RwLock<Option<Resolver<BoundIfProvider>>>>,
     wan_dns: Vec<String>,
 }
 
@@ -51,7 +53,7 @@ impl DnsServer {
         lan_ip: Ipv4Addr,
         vpn_dns: Vec<String>,
         wan_dns: Vec<String>,
-        wan_ip: Option<Ipv4Addr>,
+        wan: Option<&WanUplink>,
         lists: ResolverLists,
     ) -> Result<Self> {
         let bind = SocketAddrV4::new(lan_ip, 53);
@@ -62,9 +64,9 @@ impl DnsServer {
             .await
             .map_err(|error| TunshareError::Resolver(format!("bind TCP {bind}: {error}")))?;
 
-        let vpn_upstream = build_resolver(&vpn_dns, None)?;
-        let wan_resolver = match wan_ip {
-            Some(ip) => Some(build_resolver(&wan_dns, Some(ip))?),
+        let vpn_upstream = build_vpn_resolver(&vpn_dns)?;
+        let wan_resolver = match wan {
+            Some(wan) => Some(build_wan_resolver(&wan_dns, wan)?),
             None => None,
         };
         let wan_upstream = Arc::new(std::sync::RwLock::new(wan_resolver));
@@ -97,8 +99,8 @@ impl DnsServer {
     }
 
     /// Bind a WAN-path resolver. Needed when allowlist turns on after sharing started.
-    pub fn attach_wan(&self, wan_ip: Ipv4Addr) -> Result<()> {
-        let resolver = build_resolver(&self.wan_dns, Some(wan_ip))?;
+    pub fn attach_wan(&self, wan: &WanUplink) -> Result<()> {
+        let resolver = build_wan_resolver(&self.wan_dns, wan)?;
         let mut slot = self
             .wan_upstream
             .write()
@@ -121,42 +123,51 @@ impl Drop for DnsServer {
 struct ServerInner {
     lists: Arc<RwLock<ResolverLists>>,
     vpn_upstream: Resolver<TokioRuntimeProvider>,
-    wan_upstream: Arc<std::sync::RwLock<Option<Resolver<TokioRuntimeProvider>>>>,
+    wan_upstream: Arc<std::sync::RwLock<Option<Resolver<BoundIfProvider>>>>,
     bypass: Arc<tokio::sync::Mutex<HashMap<Ipv4Addr, Instant>>>,
 }
 
-fn build_resolver(
-    servers: &[String],
-    bind_ip: Option<Ipv4Addr>,
-) -> Result<Resolver<TokioRuntimeProvider>> {
+fn name_server_ips(servers: &[String]) -> Vec<IpAddr> {
     let ips: Vec<IpAddr> = servers
         .iter()
         .filter_map(|s| s.parse::<IpAddr>().ok())
         .filter(|ip| ip.is_ipv4())
         .collect();
-    let ips = if ips.is_empty() {
+    if ips.is_empty() {
         vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))]
     } else {
         ips
-    };
+    }
+}
 
-    let name_servers = ips
+fn resolver_config(servers: &[String]) -> ResolverConfig {
+    let name_servers = name_server_ips(servers)
         .into_iter()
         .map(|ip| {
-            let mut udp = ConnectionConfig::udp();
-            let mut tcp = ConnectionConfig::tcp();
-            if let Some(ip) = bind_ip {
-                let bind = SocketAddr::from((ip, 0));
-                udp.bind_addr = Some(bind);
-                tcp.bind_addr = Some(bind);
-            }
-            NameServerConfig::new(ip, true, vec![udp, tcp])
+            NameServerConfig::new(
+                ip,
+                true,
+                vec![ConnectionConfig::udp(), ConnectionConfig::tcp()],
+            )
         })
         .collect();
-
     let mut config = ResolverConfig::default();
     config.name_servers = name_servers;
-    let mut builder = Resolver::builder_with_config(config, TokioRuntimeProvider::default());
+    config
+}
+
+fn build_vpn_resolver(servers: &[String]) -> Result<Resolver<TokioRuntimeProvider>> {
+    let mut builder =
+        Resolver::builder_with_config(resolver_config(servers), TokioRuntimeProvider::default());
+    builder.options_mut().ndots = 0;
+    builder
+        .build()
+        .map_err(|error| TunshareError::Resolver(error.to_string()))
+}
+
+fn build_wan_resolver(servers: &[String], wan: &WanUplink) -> Result<Resolver<BoundIfProvider>> {
+    let provider = BoundIfProvider::new(&wan.iface, wan.ip)?;
+    let mut builder = Resolver::builder_with_config(resolver_config(servers), provider);
     builder.options_mut().ndots = 0;
     builder
         .build()
@@ -322,7 +333,7 @@ fn classify(qname: &str, lists: &ResolverLists) -> Decision {
 }
 
 async fn lookup_and_bypass(
-    wan: &Resolver<TokioRuntimeProvider>,
+    wan: &Resolver<BoundIfProvider>,
     inner: &ServerInner,
     qname: &str,
     qtype: RecordType,

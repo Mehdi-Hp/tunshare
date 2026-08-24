@@ -880,7 +880,7 @@ impl App {
             return false;
         };
         let lan_ip = session.lan_ip;
-        let wan_ip = session.wan.as_ref().map(|w| w.ip);
+        let wan = session.wan.clone();
         let vpn_dns = self.dns.effective();
         let wan_dns = if self.dns.system_servers.is_empty() {
             vec!["1.1.1.1".to_string()]
@@ -912,7 +912,8 @@ impl App {
                     block_enabled: block_setting.enabled,
                     allow_enabled: allow_setting.enabled,
                 };
-                let server = DnsServer::start(lan_ip, vpn_dns, wan_dns, wan_ip, lists).await?;
+                let server =
+                    DnsServer::start(lan_ip, vpn_dns, wan_dns, wan.as_ref(), lists).await?;
                 Ok((server, block, allow))
             })
             .await;
