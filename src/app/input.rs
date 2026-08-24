@@ -753,8 +753,10 @@ impl App {
             self.reload_firewall_for_bypass_async(wan);
             return;
         }
-        let exclude = vec![session.upstream.name.clone(), session.lan_name.clone()];
-        self.detect_wan_async(exclude);
+        self.detect_wan_async(
+            session.lan_name.clone(),
+            vec![session.upstream.name.clone()],
+        );
     }
 
     fn toggle_natpmp_preference(&mut self) {

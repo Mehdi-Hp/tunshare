@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::doctor::{CheckStatus, CheckSummary};
 use crate::error::Result;
 use crate::health::{HealthStatus, VpnDropStrategy};
-use crate::system::{DnsServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer, WanUplink};
+use crate::system::{DnsServer, Firewall, InterfaceInfo, IpForwarding, NatPmpServer, WanDetect};
 
 use super::async_ops::{
     AsyncOpResult, DebugInfo, PendingOp, HEALTH_CHECK_INTERVAL, HEALTH_RECHECK_DEGRADED,
@@ -273,7 +273,7 @@ impl App {
     fn on_sharing_started(
         &mut self,
         result: Result<crate::session::ActiveUpstream>,
-        wan: Option<WanUplink>,
+        wan: Option<WanDetect>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     ) {
@@ -297,10 +297,12 @@ impl App {
                     (upstream.link_mtu, upstream.effective_mtu, upstream.mss_v4());
                 if let Some(ref mut session) = self.session {
                     session.upstream = upstream;
-                    session.wan = wan;
+                    session.wan = wan.as_ref().and_then(|detect| detect.uplink.clone());
                 }
-                if let Some(wan) = self.session.as_ref().and_then(|s| s.wan.as_ref()) {
-                    self.log_info(format!("WAN uplink <{}> via <{}>", wan.iface, wan.gateway));
+                if let Some(detect) = wan.as_ref() {
+                    if let Some(message) = detect.format_found() {
+                        self.log_info(message);
+                    }
                 }
                 if eff < link {
                     self.log_info(format!(
@@ -444,20 +446,24 @@ impl App {
         }
     }
 
-    fn on_wan_detected(&mut self, result: Result<Option<WanUplink>>) {
+    fn on_wan_detected(&mut self, result: Result<WanDetect>) {
         self.clear_pending_op();
         match result {
-            Ok(Some(wan)) => {
-                self.log_info(format!("WAN uplink <{}> via <{}>", wan.iface, wan.gateway));
-                if let Some(ref mut session) = self.session {
-                    session.wan = Some(wan.clone());
+            Ok(detect) => {
+                if let Some(message) = detect.format_found() {
+                    self.log_info(message);
                 }
-                self.reload_firewall_for_bypass_async(wan);
-            }
-            Ok(None) => {
-                self.log_error(
-                    "No WAN uplink found — WAN bypass needs an ifscoped default besides LAN/VPN",
-                );
+                match detect.uplink {
+                    Some(wan) => {
+                        if let Some(ref mut session) = self.session {
+                            session.wan = Some(wan.clone());
+                        }
+                        self.reload_firewall_for_bypass_async(wan);
+                    }
+                    None => {
+                        self.log_error(format!("No WAN uplink found — {}", detect.miss_message()));
+                    }
+                }
             }
             Err(error) => {
                 self.log_error(format!("WAN detect failed: {error}"));

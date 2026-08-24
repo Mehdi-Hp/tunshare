@@ -278,7 +278,7 @@ fn normalize_geosite_domain(raw: &str) -> Option<String> {
         return filter_domain_chars(&name);
     }
     if is_geosite_tld(&name) {
-        Some(name)
+        filter_domain_chars(&name)
     } else {
         None
     }
@@ -392,7 +392,17 @@ mod tests {
         let set = DomainSet::new(names);
         assert!(set.contains_suffix("example.ir"));
         assert!(set.contains_suffix("shop.digikala.com"));
+        assert!(set.contains_suffix("فروشگاه.xn--mgba3a4f16a"));
         assert!(!set.contains_suffix("google.com"));
+        assert!(!set.contains_suffix("printer.local"));
+    }
+
+    #[test]
+    fn geosite_tld_drops_boilerplate() {
+        let mut names = HashSet::new();
+        parse_list_body("domain:local\ndomain:ir\n", &mut names);
+        assert!(names.contains("ir"));
+        assert!(!names.contains("local"));
     }
 
     #[test]

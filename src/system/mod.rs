@@ -21,7 +21,7 @@ pub use lists::{load_cached_list, load_list, DomainSet, LoadedList};
 pub use natpmp::NatPmpServer;
 pub use network::{
     default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, detect_wan_uplink,
-    read_mtu, same_ipv4_network, InterfaceInfo, WanUplink,
+    read_mtu, same_ipv4_network, InterfaceInfo, WanDetect, WanUplink,
 };
 pub use pmtu::{probe_path_mtu, CONSERVATIVE_MTU};
 pub use resolver::{DnsServer, ResolverLists};

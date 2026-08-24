@@ -2,6 +2,7 @@
 
 use crate::error::{Result, TunshareError};
 use crate::system::run_cmd;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 /// Information about a network interface.
@@ -137,33 +138,85 @@ fn is_wifi_port(description: Option<&str>) -> bool {
 }
 
 /// WAN uplink used to send allowlisted traffic around the VPN.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WanUplink {
     pub iface: String,
     pub ip: Ipv4Addr,
     pub gateway: Ipv4Addr,
 }
 
-/// Find an ifscoped default route that isn't the share LAN and isn't the VPN.
+/// Outcome of WAN detection, including hairpins we refused.
 ///
-/// First remaining candidate wins. No Wi-Fi preference: on a dual-homed
-/// share box, Wi-Fi is often a LAN client of the router being fed, not
-/// source internet. `exclude` is typically the LAN iface plus the VPN
-/// `utun`. A gateway whose MAC is already a neighbor on the share iface
-/// is a hairpin and is skipped (LAN vs WAN of the same router).
-pub async fn detect_wan_uplink(exclude: &[String]) -> Result<Option<WanUplink>> {
+/// `uplink` is the first remaining default from the IPv4 routing table after
+/// skipping tunnel, share, and share-hairpin MACs. Empty ARP is fail-closed
+/// on a missing ARP table, not a silent first leftover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WanDetect {
+    pub uplink: Option<WanUplink>,
+    pub skipped_hairpins: Vec<String>,
+    pub arp_unavailable: bool,
+}
+
+impl WanDetect {
+    pub fn format_found(&self) -> Option<String> {
+        let wan = self.uplink.as_ref()?;
+        let mut message = format!("WAN uplink <{}> via <{}>", wan.iface, wan.gateway);
+        if !self.skipped_hairpins.is_empty() {
+            message.push_str(" (skipped hairpin ");
+            message.push_str(&self.skipped_hairpins.join(", "));
+            message.push(')');
+        }
+        Some(message)
+    }
+
+    pub fn miss_message(&self) -> String {
+        if self.arp_unavailable {
+            "could not read ARP neighbors; refused a WAN pick that might hairpin the share LAN"
+                .into()
+        } else if !self.skipped_hairpins.is_empty() {
+            format!(
+                "every remaining ifscoped default hairpins the share LAN ({})",
+                self.skipped_hairpins.join(", ")
+            )
+        } else {
+            "need an ifscoped default besides LAN/VPN".into()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArpSnapshot {
+    Neighbors(Vec<ArpNeighbor>),
+    Unavailable,
+}
+
+/// Find an ifscoped default that isn't the share LAN and isn't the VPN.
+///
+/// Hiddify analogue: OS default NIC, minus tunnel, minus share, minus a
+/// gateway whose MAC is already a neighbor on the share iface (LAN vs WAN
+/// of the same router). Wi-Fi is not preferred — on a dual-homed share box it is often
+/// a LAN client of the router being fed. Travel-router Wi-Fi still wins when
+/// it *is* the OS default and its AP MAC is not on the share cable.
+pub async fn detect_wan_uplink(share_iface: &str, exclude: &[String]) -> Result<WanDetect> {
     let ifconfig_output = run_cmd("ifconfig", &["-a"]).await?;
     let ifconfig_stdout = String::from_utf8_lossy(&ifconfig_output.stdout);
     let interfaces = parse_interfaces(&ifconfig_stdout);
 
-    let arp_neighbors = match run_cmd("arp", &["-an"]).await {
+    let arp = match run_cmd("arp", &["-an"]).await {
         Ok(output) if output.status.success() => {
-            parse_arp_an(&String::from_utf8_lossy(&output.stdout))
+            ArpSnapshot::Neighbors(parse_arp_an(&String::from_utf8_lossy(&output.stdout)))
+        }
+        _ => ArpSnapshot::Unavailable,
+    };
+    let ranked_ifaces = match run_cmd("netstat", &["-rn", "-f", "inet"]).await {
+        Ok(output) if output.status.success() => {
+            parse_netstat_default_ifaces(&String::from_utf8_lossy(&output.stdout))
         }
         _ => Vec::new(),
     };
-    let share_iface = share_iface_from_exclude(exclude);
 
+    let mut probed: HashMap<String, WanUplink> = HashMap::new();
+    let mut probe_order = Vec::new();
     for iface in &interfaces {
         if !iface.is_up || iface.ipv4_address.is_none() {
             continue;
@@ -171,28 +224,95 @@ pub async fn detect_wan_uplink(exclude: &[String]) -> Result<Option<WanUplink>> 
         if iface.name.starts_with("lo") || iface.name.starts_with("utun") {
             continue;
         }
-        if exclude.iter().any(|n| n == &iface.name) {
+        if iface.name == share_iface || exclude.iter().any(|name| name == &iface.name) {
             continue;
         }
         let Some(uplink) = probe_ifscope_default(&iface.name, iface.ipv4_address).await? else {
             continue;
         };
-        if let Some(share) = share_iface {
-            if gateway_hairpins_share(uplink.gateway, share, &arp_neighbors) {
-                continue;
-            }
-        }
-        return Ok(Some(uplink));
+        probe_order.push(iface.name.clone());
+        probed.insert(iface.name.clone(), uplink);
     }
 
-    Ok(None)
+    let mut candidates = Vec::new();
+    for name in ranked_ifaces {
+        if let Some(uplink) = probed.remove(&name) {
+            candidates.push(uplink);
+        }
+    }
+    for name in probe_order {
+        if let Some(uplink) = probed.remove(&name) {
+            candidates.push(uplink);
+        }
+    }
+
+    Ok(select_wan_uplink(candidates, share_iface, &arp))
 }
 
-fn share_iface_from_exclude(exclude: &[String]) -> Option<&str> {
-    exclude
-        .iter()
-        .find(|name| !name.starts_with("utun") && !name.starts_with("lo"))
-        .map(String::as_str)
+fn parse_netstat_default_ifaces(output: &str) -> Vec<String> {
+    let mut ifaces = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Internet6") {
+            break;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let Some("default") = parts.next() else {
+            continue;
+        };
+        // Darwin prints either `Gateway Flags Netif` or `Gateway Flags Refs Use Netif`.
+        let Some(netif) = parts.rfind(|token| looks_like_netif(token)) else {
+            continue;
+        };
+        if !ifaces.iter().any(|name| name == netif) {
+            ifaces.push(netif.to_string());
+        }
+    }
+    ifaces
+}
+
+fn looks_like_netif(token: &str) -> bool {
+    let mut letters = false;
+    let mut digits = false;
+    for byte in token.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' => letters = true,
+            b'0'..=b'9' => digits = true,
+            b'-' | b'_' => {}
+            _ => return false,
+        }
+    }
+    letters && digits
+}
+
+fn select_wan_uplink(
+    candidates: Vec<WanUplink>,
+    share_iface: &str,
+    arp: &ArpSnapshot,
+) -> WanDetect {
+    let mut skipped_hairpins = Vec::new();
+    let mut remaining = Vec::new();
+    for uplink in candidates {
+        if gateway_hairpins_share(uplink.gateway, share_iface, arp) {
+            skipped_hairpins.push(uplink.iface);
+        } else {
+            remaining.push(uplink);
+        }
+    }
+
+    if matches!(arp, ArpSnapshot::Unavailable) {
+        return WanDetect {
+            uplink: None,
+            skipped_hairpins,
+            arp_unavailable: true,
+        };
+    }
+
+    WanDetect {
+        uplink: remaining.into_iter().next(),
+        skipped_hairpins,
+        arp_unavailable: false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,8 +323,13 @@ struct ArpNeighbor {
 }
 
 /// True when `gateway`'s MAC already appears as a neighbor on `share_iface`.
-/// ARP miss is not a hairpin (travel-router WAN is not on the share cable).
-fn gateway_hairpins_share(gateway: Ipv4Addr, share_iface: &str, neighbors: &[ArpNeighbor]) -> bool {
+/// A missing ARP *entry* is not a hairpin (travel-router WAN is not on the
+/// share cable). A missing ARP *table* is a hairpin — fail closed.
+fn gateway_hairpins_share(gateway: Ipv4Addr, share_iface: &str, arp: &ArpSnapshot) -> bool {
+    let neighbors = match arp {
+        ArpSnapshot::Unavailable => return true,
+        ArpSnapshot::Neighbors(neighbors) => neighbors,
+    };
     let Some(mac) = neighbors
         .iter()
         .find(|neighbor| neighbor.ip == gateway)
@@ -223,8 +348,10 @@ fn parse_arp_an(output: &str) -> Vec<ArpNeighbor> {
 
 fn parse_arp_line(line: &str) -> Option<ArpNeighbor> {
     let ip_open = line.find('(')?;
-    let ip_close = line[ip_open + 1..].find(')')?;
-    let ip: Ipv4Addr = line[ip_open + 1..ip_open + 1 + ip_close].parse().ok()?;
+    let after_open = &line[ip_open + 1..];
+    let ip_close = after_open.find(')')?;
+    let ip_token = &after_open[..ip_close];
+    let ip: Ipv4Addr = ip_token.parse().ok()?;
     let after_at = line.split_once(" at ")?.1;
     let mut rest = after_at.split_whitespace();
     let mac_raw = rest.next()?;
@@ -240,24 +367,26 @@ fn parse_arp_line(line: &str) -> Option<ArpNeighbor> {
 }
 
 fn normalize_mac(raw: &str) -> Option<String> {
-    let parts: Vec<&str> = raw.split(':').collect();
-    if parts.len() != 6 {
-        return None;
-    }
     let mut out = String::with_capacity(17);
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() || part.len() > 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let mut octets = 0usize;
+    for part in raw.split(':') {
+        if octets == 6
+            || part.is_empty()
+            || part.len() > 2
+            || !part.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return None;
         }
-        if i > 0 {
+        if octets > 0 {
             out.push(':');
         }
         if part.len() == 1 {
             out.push('0');
         }
         out.push_str(&part.to_ascii_lowercase());
+        octets += 1;
     }
-    Some(out)
+    (octets == 6).then_some(out)
 }
 
 async fn probe_ifscope_default(iface: &str, ip: Option<Ipv4Addr>) -> Result<Option<WanUplink>> {
@@ -520,13 +649,6 @@ utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
         assert!(!same_ipv4_network(&lan, &vpn));
     }
 
-    #[test]
-    fn share_iface_skips_utun_and_loopback() {
-        let exclude = vec!["utun4".into(), "en8".into()];
-        assert_eq!(share_iface_from_exclude(&exclude), Some("en8"));
-        assert_eq!(share_iface_from_exclude(&["utun4".into()]), None);
-    }
-
     const FIXTURE_ARP: &str = "\
 ? (192.0.2.1) at 00:00:5e:00:53:aa on en0 ifscope [ethernet]
 ? (192.168.2.1) at 00:00:5e:00:53:cc on en8 ifscope permanent [ethernet]
@@ -535,38 +657,152 @@ utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
 ? (198.51.100.50) at (incomplete) on en4 ifscope [ethernet]
 ";
 
+    fn fixture_arp() -> ArpSnapshot {
+        ArpSnapshot::Neighbors(parse_arp_an(FIXTURE_ARP))
+    }
+
+    fn wan(iface: &str, ip: [u8; 4], gateway: [u8; 4]) -> WanUplink {
+        WanUplink {
+            iface: iface.into(),
+            ip: Ipv4Addr::from(ip),
+            gateway: Ipv4Addr::from(gateway),
+        }
+    }
+
     #[test]
     fn parse_arp_skips_incomplete_and_pads_octets() {
-        let neighbors = parse_arp_an(FIXTURE_ARP);
-        assert_eq!(neighbors.len(), 4);
+        let ArpSnapshot::Neighbors(neighbors) = fixture_arp() else {
+            panic!("fixture ARP is neighbors");
+        };
         let share = neighbors
             .iter()
             .find(|n| n.ip == Ipv4Addr::new(192, 168, 2, 1))
             .expect("share self");
         assert_eq!(share.mac, "00:00:5e:00:53:cc");
         assert_eq!(share.iface, "en8");
-        assert!(neighbors
-            .iter()
-            .all(|n| n.ip != Ipv4Addr::new(198, 51, 100, 50)));
+        let ips: Vec<_> = neighbors.iter().map(|n| n.ip).collect();
+        assert_eq!(
+            ips,
+            vec![
+                Ipv4Addr::new(192, 0, 2, 1),
+                Ipv4Addr::new(192, 168, 2, 1),
+                Ipv4Addr::new(192, 168, 2, 50),
+                Ipv4Addr::new(198, 51, 100, 1),
+            ]
+        );
     }
 
     #[test]
     fn router_lan_gateway_hairpins_share() {
-        let neighbors = parse_arp_an(FIXTURE_ARP);
+        let arp = fixture_arp();
         assert!(gateway_hairpins_share(
             Ipv4Addr::new(198, 51, 100, 1),
             "en8",
-            &neighbors
+            &arp
         ));
         assert!(!gateway_hairpins_share(
             Ipv4Addr::new(192, 0, 2, 1),
             "en8",
-            &neighbors
+            &arp
         ));
         assert!(!gateway_hairpins_share(
             Ipv4Addr::new(1, 1, 1, 1),
             "en8",
-            &neighbors
+            &arp
         ));
+        assert!(gateway_hairpins_share(
+            Ipv4Addr::new(192, 0, 2, 1),
+            "en8",
+            &ArpSnapshot::Unavailable
+        ));
+    }
+
+    #[test]
+    fn parse_netstat_ranks_defaults_and_skips_v6() {
+        let table = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            10.8.0.5           UGScg               utun4
+default            198.51.100.1       UGScIg               en1
+default            192.0.2.1      UGScIg               en0
+127                127.0.0.1          UCS                  lo0
+
+Internet6:
+Destination                             Gateway                                 Flags         Netif Expire
+default                                 fe80::%utun4                            UGcI          utun4
+";
+        assert_eq!(
+            parse_netstat_default_ifaces(table),
+            vec!["utun4", "en1", "en0"]
+        );
+
+        let with_refs = "\
+Destination        Gateway            Flags            Refs      Use Netif Expire
+default            10.8.0.5           UGScg               6        0 utun4
+default            192.0.2.1      UGScIg              1        0   en0
+";
+        assert_eq!(
+            parse_netstat_default_ifaces(with_refs),
+            vec!["utun4", "en0"]
+        );
+    }
+
+    #[test]
+    fn select_skips_hairpin_even_when_it_ranks_first() {
+        let candidates = vec![
+            wan("en1", [198, 51, 100, 50], [198, 51, 100, 1]),
+            wan("en0", [192, 0, 2, 2], [192, 0, 2, 1]),
+        ];
+        let picked = select_wan_uplink(candidates, "en8", &fixture_arp());
+        assert_eq!(
+            picked.uplink.as_ref().map(|w| w.iface.as_str()),
+            Some("en0")
+        );
+        assert_eq!(picked.skipped_hairpins, vec!["en1".to_string()]);
+        assert!(!picked.arp_unavailable);
+    }
+
+    #[test]
+    fn select_refuses_when_arp_is_unavailable() {
+        let candidates = vec![wan("en0", [192, 0, 2, 2], [192, 0, 2, 1])];
+        let picked = select_wan_uplink(candidates, "en8", &ArpSnapshot::Unavailable);
+        assert!(picked.uplink.is_none());
+        assert!(picked.arp_unavailable);
+        assert_eq!(picked.skipped_hairpins, vec!["en0".to_string()]);
+    }
+
+    #[test]
+    fn select_logs_skipped_hairpins_when_a_later_candidate_wins() {
+        let candidates = vec![
+            wan("en1", [198, 51, 100, 50], [198, 51, 100, 1]),
+            wan("en0", [192, 0, 2, 2], [192, 0, 2, 1]),
+        ];
+        let picked = select_wan_uplink(candidates, "en8", &fixture_arp());
+        assert_eq!(
+            picked.format_found().as_deref(),
+            Some("WAN uplink <en0> via <192.0.2.1> (skipped hairpin en1)")
+        );
+    }
+
+    #[test]
+    fn miss_message_names_hairpin_or_arp() {
+        let hairpin_only = select_wan_uplink(
+            vec![wan("en1", [198, 51, 100, 50], [198, 51, 100, 1])],
+            "en8",
+            &fixture_arp(),
+        );
+        assert!(hairpin_only.uplink.is_none());
+        assert_eq!(
+            hairpin_only.miss_message(),
+            "every remaining ifscoped default hairpins the share LAN (en1)"
+        );
+        let arp_down = select_wan_uplink(
+            vec![wan("en0", [192, 0, 2, 2], [192, 0, 2, 1])],
+            "en8",
+            &ArpSnapshot::Unavailable,
+        );
+        assert!(arp_down.miss_message().contains("could not read ARP"));
     }
 }

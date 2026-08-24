@@ -15,7 +15,7 @@ use crate::system::{
     brew::find_brew, detect_lan_interfaces, detect_vpn_interfaces, detect_wan_uplink,
     discover_vpn_dns, dns::get_default_dns, load_list, read_interface_bytes, BypassConfig,
     DhcpServer, DnsServer, Firewall, InterfaceBytes, InterfaceInfo, IpForwarding, NatPmpServer,
-    ResolverLists, WanUplink,
+    ResolverLists, WanDetect, WanUplink,
 };
 
 use super::App;
@@ -80,7 +80,7 @@ pub enum AsyncOpResult {
         /// clamp MTU) so the session can adopt it — the session is constructed
         /// with a placeholder (MTU=0) until this lands.
         result: Result<crate::session::ActiveUpstream>,
-        wan: Option<WanUplink>,
+        wan: Option<WanDetect>,
         firewall: Firewall,
         ip_forwarding: IpForwarding,
     },
@@ -102,7 +102,7 @@ pub enum AsyncOpResult {
         allowlist_on: bool,
     },
     WanDetected {
-        result: Result<Option<WanUplink>>,
+        result: Result<WanDetect>,
     },
     DhcpStarted {
         result: Result<()>,
@@ -318,64 +318,70 @@ impl App {
         let allowlist_on = self.lists.allow.enabled;
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            let result = timeout(TIMEOUT_START_SHARING, async {
-                ip_forwarding.enable().await?;
+            let result =
+                timeout(TIMEOUT_START_SHARING, async {
+                    ip_forwarding.enable().await?;
 
-                let wan = if allowlist_on {
-                    let exclude = vec![vpn_name.clone(), lan_name.clone()];
-                    match detect_wan_uplink(&exclude).await {
-                        Ok(Some(uplink)) => Some(uplink),
-                        Ok(None) => {
-                            let _ = ip_forwarding.restore().await;
-                            return Err(TunshareError::FirewallError(
-                                "WAN bypass is on but no WAN uplink was found (need an ifscoped default besides LAN/VPN)".into(),
-                            ));
+                    let wan = if allowlist_on {
+                        match detect_wan_uplink(&lan_name, std::slice::from_ref(&vpn_name)).await {
+                            Ok(detect) => {
+                                if detect.uplink.is_none() {
+                                    let _ = ip_forwarding.restore().await;
+                                    return Err(TunshareError::FirewallError(format!(
+                                        "WAN bypass is on but no WAN uplink was found ({})",
+                                        detect.miss_message()
+                                    )));
+                                }
+                                Some(detect)
+                            }
+                            Err(error) => {
+                                let _ = ip_forwarding.restore().await;
+                                return Err(error);
+                            }
                         }
-                        Err(error) => {
-                            let _ = ip_forwarding.restore().await;
-                            return Err(error);
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // Resolve the upstream first (link MTU + the effective clamp
-                // MTU, which under `Auto` runs the path-MTU probe) so the pf
-                // scrub `max-mss` reflects the real path, not the tunnel's
-                // inflated interface MTU.
-                let upstream =
-                    match crate::session::ActiveUpstream::detect(vpn_name.clone(), mtu_policy)
-                        .await
-                    {
-                        Ok(u) => u,
-                        Err(e) => {
-                            let _ = ip_forwarding.restore().await;
-                            return Err(e);
-                        }
+                    } else {
+                        None
                     };
 
-                let bypass = wan.as_ref().map(|w| BypassConfig {
-                    wan_if: w.iface.clone(),
-                    wan_gw: w.gateway,
-                });
-                if let Err(e) = firewall
-                    .load_rules(
-                        &upstream.name,
-                        &lan_name,
-                        lan_ip,
-                        upstream.mss_v4(),
-                        bypass.as_ref(),
-                    )
-                    .await
-                {
-                    let _ = ip_forwarding.restore().await;
-                    return Err(e);
-                }
+                    // Resolve the upstream first (link MTU + the effective clamp
+                    // MTU, which under `Auto` runs the path-MTU probe) so the pf
+                    // scrub `max-mss` reflects the real path, not the tunnel's
+                    // inflated interface MTU.
+                    let upstream =
+                        match crate::session::ActiveUpstream::detect(vpn_name.clone(), mtu_policy)
+                            .await
+                        {
+                            Ok(u) => u,
+                            Err(e) => {
+                                let _ = ip_forwarding.restore().await;
+                                return Err(e);
+                            }
+                        };
 
-                Ok((upstream, wan))
-            })
-            .await;
+                    let bypass =
+                        wan.as_ref()
+                            .and_then(|detect| detect.uplink.as_ref())
+                            .map(|uplink| BypassConfig {
+                                wan_if: uplink.iface.clone(),
+                                wan_gw: uplink.gateway,
+                            });
+                    if let Err(e) = firewall
+                        .load_rules(
+                            &upstream.name,
+                            &lan_name,
+                            lan_ip,
+                            upstream.mss_v4(),
+                            bypass.as_ref(),
+                        )
+                        .await
+                    {
+                        let _ = ip_forwarding.restore().await;
+                        return Err(e);
+                    }
+
+                    Ok((upstream, wan))
+                })
+                .await;
 
             let (result, wan) = match result {
                 Ok(Ok((upstream, wan))) => (Ok(upstream), wan),
@@ -976,7 +982,7 @@ impl App {
         });
     }
 
-    pub(super) fn detect_wan_async(&mut self, exclude: Vec<String>) {
+    pub(super) fn detect_wan_async(&mut self, share_iface: String, exclude: Vec<String>) {
         if self.pending_op.is_some() {
             return;
         }
@@ -984,7 +990,11 @@ impl App {
         self.log_info("Looking for a WAN uplink...");
         let tx = self.op_tx.clone();
         tokio::spawn(async move {
-            let result = timeout(TIMEOUT_INTERFACES, detect_wan_uplink(&exclude)).await;
+            let result = timeout(
+                TIMEOUT_INTERFACES,
+                detect_wan_uplink(&share_iface, &exclude),
+            )
+            .await;
             let result = match result {
                 Ok(inner) => inner,
                 Err(_) => Err(timeout_err("detect_wan")),
