@@ -68,7 +68,7 @@ impl Firewall {
                     "nat on $wan_if inet from $int_if:network to <{BYPASS_TABLE}> -> ($wan_if) static-port\n"
                 ),
                 format!(
-                    "pass in quick on $int_if inet from $int_if:network to <{BYPASS_TABLE}> route-to ($wan_if $wan_gw) keep state\npass out quick on $wan_if inet from ($wan_if) to any keep state\n"
+                    "pass in quick on $int_if route-to ($wan_if $wan_gw) inet from $int_if:network to <{BYPASS_TABLE}> keep state\npass out quick on $wan_if inet from ($wan_if) to any keep state\n"
                 ),
             ),
             None => (
@@ -403,7 +403,12 @@ mod tests {
         assert!(rules.contains("wan_gw = \"192.168.1.1\""));
         assert!(rules.contains("to ! <tunshare_bypass>"));
         assert!(rules.contains("nat on $wan_if inet from $int_if:network to <tunshare_bypass>"));
-        assert!(rules.contains("route-to ($wan_if $wan_gw)"));
+        // Apple pf wants route-to after `on $if` and before `from`. OpenBSD
+        // `from … to … route-to` is a syntax error at load time.
+        assert!(rules.contains(
+            "pass in quick on $int_if route-to ($wan_if $wan_gw) inet from $int_if:network to <tunshare_bypass> keep state"
+        ));
+        assert!(!rules.contains("to <tunshare_bypass> route-to"));
         assert!(!rules.contains("route-to ($int_if"));
     }
 }
