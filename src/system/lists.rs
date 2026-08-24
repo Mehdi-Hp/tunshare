@@ -236,18 +236,18 @@ pub fn parse_list_body(body: &str, out: &mut HashSet<String>) {
 }
 
 fn parse_list_line(line: &str) -> Option<String> {
-    let token = if let Some(rest) = line.strip_prefix("domain:") {
-        rest.split_whitespace().next()?
+    if let Some(rest) = line.strip_prefix("domain:") {
+        let token = rest.split_whitespace().next()?;
+        return normalize_geosite_domain(token);
+    }
+    let mut parts = line.split_whitespace();
+    let first = parts.next()?;
+    let token = if looks_like_ipv4(first) || first == "::1" || first.starts_with("fe80:") {
+        parts.next()?
+    } else if first.contains('/') || first.contains('=') {
+        return None;
     } else {
-        let mut parts = line.split_whitespace();
-        let first = parts.next()?;
-        if looks_like_ipv4(first) || first == "::1" || first.starts_with("fe80:") {
-            parts.next()?
-        } else if first.contains('/') || first.contains('=') {
-            return None;
-        } else {
-            first
-        }
+        first
     };
     normalize_domain(token)
 }
@@ -271,17 +271,43 @@ fn looks_like_ipv4(s: &str) -> bool {
     dots == 3
 }
 
+/// Geosite `domain:` tokens include TLD suffixes (`ir`) with no dot.
+fn normalize_geosite_domain(raw: &str) -> Option<String> {
+    let name = strip_domain_token(raw)?;
+    if name.contains('.') {
+        return filter_domain_chars(&name);
+    }
+    if is_geosite_tld(&name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
 fn normalize_domain(raw: &str) -> Option<String> {
+    let name = strip_domain_token(raw)?;
+    if !name.contains('.') {
+        return None;
+    }
+    filter_domain_chars(&name)
+}
+
+fn strip_domain_token(raw: &str) -> Option<String> {
     let name = raw
         .trim()
         .trim_end_matches('.')
         .trim_start_matches('*')
         .trim_start_matches('.');
     let name = name.to_ascii_lowercase();
-    if name.is_empty() || !name.contains('.') {
-        return None;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
-    if is_boilerplate(&name) {
+}
+
+fn filter_domain_chars(name: &str) -> Option<String> {
+    if is_boilerplate(name) {
         return None;
     }
     if !name
@@ -290,7 +316,18 @@ fn normalize_domain(raw: &str) -> Option<String> {
     {
         return None;
     }
-    Some(name)
+    Some(name.to_string())
+}
+
+/// Geosite TLD token: ASCII label, or IDN punycode (`xn--mgba3a4f16a` = ایران).
+fn is_geosite_tld(name: &str) -> bool {
+    if name.len() < 2 {
+        return false;
+    }
+    if let Some(rest) = name.strip_prefix("xn--") {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    }
+    name.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
 fn is_boilerplate(name: &str) -> bool {
@@ -337,6 +374,25 @@ mod tests {
         assert!(names.contains("digikala.com"));
         assert!(names.contains("bankmellat.ir"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn parse_geosite_tld_tokens() {
+        let mut names = HashSet::new();
+        parse_list_body(
+            "domain:ir\ndomain:xn--mgba3a4f16a\ndomain:digikala.com\nir\nnot a domain\n",
+            &mut names,
+        );
+        assert!(names.contains("ir"));
+        assert!(names.contains("xn--mgba3a4f16a"));
+        assert!(names.contains("digikala.com"));
+        assert!(!names.contains("not"));
+        assert_eq!(names.len(), 3);
+
+        let set = DomainSet::new(names);
+        assert!(set.contains_suffix("example.ir"));
+        assert!(set.contains_suffix("shop.digikala.com"));
+        assert!(!set.contains_suffix("google.com"));
     }
 
     #[test]
