@@ -25,9 +25,9 @@ tunshare exists because of that gap. It detects your VPN tunnel directly, sets u
 - **DHCP server** -- optionally runs `dnsmasq` so connected devices get IP addresses without manual config
 - **NAT-PMP** -- native RFC 6886 server for automatic port mapping (replaces external miniupnpd)
 - **DNS capture** -- LAN DNS is always this Mac (DHCP option 6 + pf `rdr` of port 53). Presets pick the VPN-path resolver behind that.
-- **Block / allow lists** -- optional DNS blocklist (NXDOMAIN) and WAN split-tunnel allowlist. Both off until you turn them on. Allowlist needs a WAN uplink besides LAN/VPN.
+- **Domain filters** -- two-column TUI: Block (NXDOMAIN) and WAN bypass (split-tunnel). Each column has a master switch plus per-source on/off; add custom URLs in the TUI. Builtins stay, disable-only. Extra lists (HaGeZi Light/TIF, 1Hosts Lite, Phishing Army, China WAN) default off so enabling Block does not fetch megabytes. WAN bypass needs a WAN uplink besides LAN/VPN.
 - **Health monitoring** -- detects VPN disconnects and IP forwarding changes within seconds, shown in the header
-- **Persistent preferences** -- DHCP, NAT-PMP, DNS, and list toggles are saved across sessions
+- **Persistent preferences** -- DHCP, NAT-PMP, DNS, and domain-filter toggles are saved across sessions
 - **Debug panel** -- live view of active firewall rules, interface state, and NAT-PMP mappings
 - **Clean shutdown** -- all firewall rules, IP forwarding, DHCP, and NAT-PMP are torn down on exit (even on panic)
 
@@ -91,7 +91,10 @@ sudo tunshare
 | `Esc` | Cancel / go back |
 | `s` | Stop sharing (when active) |
 | `d` | Toggle debug panel (when active) |
-| `l` | Lists (while sharing) / expand logs (idle menu) |
+| `l` | Domain filters (while sharing) / expand logs (idle menu) |
+| `x` | Remove a custom source on Domain filters (builtins stay) |
+| `Tab` / `←` `→` | Switch Domain filters column |
+| `r` | Refresh Domain filters (on that screen) |
 | `q` | Quit |
 | `Ctrl+C` | Force quit |
 
@@ -102,16 +105,16 @@ sudo tunshare
 3. Pick your VPN interface (or let it auto-detect)
 4. Pick your LAN interface
 5. Optionally configure DNS (the LAN resolver on this Mac; presets choose the VPN-path upstream)
-6. Optionally open **Lists** to turn on the blocklist or allowlist
-7. Traffic from LAN devices now routes through your VPN (allowlisted domains go out WAN)
+6. Optionally open **Domain filters** to turn on Block or WAN bypass, toggle sources, or add URLs
+7. Traffic from LAN devices now routes through your VPN (WAN-bypass domains go out WAN)
 8. Press `s` to stop, `q` to quit
 
 ## How it works
 
 1. **IP forwarding** -- enables `net.inet.ip.forwarding` via `sysctl`
-2. **pf NAT rules** -- masquerades LAN traffic behind the VPN; always redirects LAN `:53` to this Mac. With the allowlist on, destinations in `<tunshare_bypass>` NAT/`route-to` the WAN uplink
+2. **pf NAT rules** -- masquerades LAN traffic behind the VPN; always redirects LAN `:53` to this Mac. With WAN bypass on, destinations in `<tunshare_bypass>` NAT/`route-to` the WAN uplink
 3. **DHCP** -- if `dnsmasq` is installed, runs it on the LAN interface (DHCP only, `port=0`) and advertises this Mac as DNS
-4. **LAN resolver** -- in-process DNS on LAN `:53`. Blocked names → NXDOMAIN. Allowlisted names resolve via WAN DNS, then join the pf bypass table before the answer
+4. **LAN resolver** -- in-process DNS on LAN `:53`. Blocked names → NXDOMAIN. WAN-bypass names resolve via WAN DNS, then join the pf bypass table before the answer
 5. **NAT-PMP** -- runs a native NAT-PMP server (RFC 6886) on the LAN interface for automatic port mapping
 6. **Cleanup** -- on exit (normal, error, or panic), the resolver, firewall, IP forwarding, DHCP, and NAT-PMP are torn down
 

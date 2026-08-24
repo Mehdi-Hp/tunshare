@@ -193,7 +193,7 @@ impl PendingOp {
             PendingOp::InstallingDnsmasq => "Installing dnsmasq via Homebrew...",
             PendingOp::ReloadingUpstream => "Reloading rules for new VPN interface...",
             PendingOp::StartingResolver => "Starting DNS resolver...",
-            PendingOp::RefreshingLists => "Refreshing domain lists...",
+            PendingOp::RefreshingLists => "Refreshing domain filters...",
             PendingOp::ReloadingFirewall => "Reloading firewall rules...",
             PendingOp::DetectingWan => "Looking for a WAN uplink...",
         }
@@ -328,7 +328,7 @@ impl App {
                         Ok(None) => {
                             let _ = ip_forwarding.restore().await;
                             return Err(TunshareError::FirewallError(
-                                "allowlist is on but no WAN uplink was found (need an ifscoped default besides LAN/VPN)".into(),
+                                "WAN bypass is on but no WAN uplink was found (need an ifscoped default besides LAN/VPN)".into(),
                             ));
                         }
                         Err(error) => {
@@ -954,7 +954,7 @@ impl App {
             return;
         }
         self.set_pending_op(PendingOp::RefreshingLists);
-        self.log_info("Refreshing domain lists...");
+        self.log_info("Refreshing domain filters...");
         let block_setting = self.lists.block.clone();
         let allow_setting = self.lists.allow.clone();
         let tx = self.op_tx.clone();

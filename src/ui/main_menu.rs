@@ -327,11 +327,11 @@ fn menu_item_description(item: &MenuItem, app: &App) -> (&'static str, Vec<&'sta
             ],
         ),
         MenuItem::ViewLists => (
-            "Lists",
+            "Domain filters",
             vec![
-                "Block ads at DNS. Allowlist sends those",
-                "domains out the WAN, around the VPN.",
-                "Both off by default. Live while sharing.",
+                "Block answers NXDOMAIN. WAN bypass sends",
+                "listed names around the VPN. Toggle sources.",
+                "Add your own URLs.",
             ],
         ),
         MenuItem::RunDoctor => (
@@ -452,7 +452,7 @@ fn menu_item_label_str(item: &MenuItem) -> &'static str {
         MenuItem::ToggleNatPmp => "NAT-PMP Server",
         MenuItem::SetDns => "DNS Server",
         MenuItem::SetMtu => "Tunnel MTU",
-        MenuItem::ViewLists => "Lists",
+        MenuItem::ViewLists => "Domain filters",
         MenuItem::RunDoctor => "Run Doctor",
         MenuItem::Quit => "Quit",
     }
@@ -502,13 +502,13 @@ fn menu_item_label_status(item: &MenuItem, app: &App) -> (String, Option<StatusB
         ),
         MenuItem::ViewLists => {
             let badge = match (app.lists.block.enabled, app.lists.allow.enabled) {
-                (true, true) => "block+allow",
+                (true, true) => "block+wan",
                 (true, false) => "block",
-                (false, true) => "allow",
+                (false, true) => "wan",
                 (false, false) => "off",
             };
             (
-                "Lists".to_string(),
+                "Domain filters".to_string(),
                 Some(StatusBadge::Value(badge.to_string())),
             )
         }

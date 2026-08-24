@@ -41,7 +41,7 @@ Release builds are produced by CI for distribution. For ad-hoc optimized testing
 **`src/ui/`** - TUI components using ratatui:
 - `main_menu.rs` - Main menu and connection info
 - `interface_select.rs` - VPN/LAN interface selection
-- `lists.rs` - Blocklist / allowlist screen
+- `lists.rs` - Domain filters screen (Block / WAN bypass, per-source)
 - `status.rs` - Log panel and loading indicators
 - `debug.rs` - Debug overlay panel
 - `theme.rs` - Color scheme

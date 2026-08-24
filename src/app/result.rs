@@ -391,14 +391,14 @@ impl App {
             self.log_warning(format!("List fetch: {error}"));
         }
         if block.used_stale || allow.used_stale {
-            self.log_warning("Using stale cached lists");
+            self.log_warning("Using stale cached domain filters");
         }
         self.lists_ui.block_count = block.set.len();
         self.lists_ui.allow_count = allow.set.len();
         self.lists_ui.block_fetched = block.last_fetch;
         self.lists_ui.allow_fetched = allow.last_fetch;
         self.log_info(format!(
-            "Lists: block {} · allow {}",
+            "Domain filters: block {} · wan {}",
             block.set.len(),
             allow.set.len()
         ));
@@ -433,7 +433,7 @@ impl App {
                     self.lists.allow.enabled = true;
                     self.save_preferences();
                     self.push_lists_to_resolver(None, None);
-                    self.log_info("Allowlist on");
+                    self.log_info("WAN bypass on");
                 } else {
                     self.log_info("Firewall rules reloaded without WAN bypass");
                     self.push_lists_to_resolver(None, None);
@@ -459,7 +459,7 @@ impl App {
             }
             Ok(None) => {
                 self.log_error(
-                    "No WAN uplink found — allowlist needs an ifscoped default besides LAN/VPN",
+                    "No WAN uplink found — WAN bypass needs an ifscoped default besides LAN/VPN",
                 );
             }
             Err(error) => {

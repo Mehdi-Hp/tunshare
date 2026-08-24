@@ -12,7 +12,7 @@ use crate::config::{LanMtu, MTU_MAX, MTU_MIN};
 
 use super::dns::{DnsEditMode, DNS_PRESETS};
 use super::mtu::{MtuEditMode, Preset as MtuPreset, PRESETS as MTU_PRESETS};
-use super::state::MenuItem;
+use super::state::{FilterJob, FilterRow, MenuItem};
 use super::{App, AppState};
 
 impl App {
@@ -519,7 +519,11 @@ impl App {
         } else {
             AppState::Menu
         };
-        self.lists_ui.selected = 0;
+        self.lists_ui.focus = FilterJob::Block;
+        self.lists_ui.block_selected = 0;
+        self.lists_ui.allow_selected = 0;
+        self.lists_ui.adding = None;
+        self.lists_ui.input_buffer.clear();
         self.state = AppState::ViewingLists;
         if self.lists_ui.block_count == 0 && self.lists_ui.allow_count == 0 {
             self.refresh_lists_async(false);
@@ -527,14 +531,32 @@ impl App {
     }
 
     fn handle_lists_key(&mut self, key: KeyCode) {
+        if self.lists_ui.adding.is_some() {
+            self.handle_lists_add_key(key);
+            return;
+        }
+        let row_count = self.column_rows(self.lists_ui.focus).len();
         match key {
-            KeyCode::Up | KeyCode::Char('k') if self.lists_ui.selected > 0 => {
-                self.lists_ui.selected -= 1;
+            KeyCode::Up | KeyCode::Char('k') => {
+                let selected = self.lists_selected_mut();
+                if *selected > 0 {
+                    *selected -= 1;
+                }
             }
-            KeyCode::Down | KeyCode::Char('j') if self.lists_ui.selected < 1 => {
-                self.lists_ui.selected += 1;
+            KeyCode::Down | KeyCode::Char('j') => {
+                let selected = self.lists_selected_mut();
+                if *selected + 1 < row_count {
+                    *selected += 1;
+                }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => self.toggle_selected_list(),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.lists_ui.focus = FilterJob::Block;
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                self.lists_ui.focus = FilterJob::Allow;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_filter_row(),
+            KeyCode::Char('x') | KeyCode::Char('X') => self.remove_selected_custom(),
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.refresh_lists_async(self.is_sharing());
             }
@@ -545,31 +567,175 @@ impl App {
         }
     }
 
-    fn toggle_selected_list(&mut self) {
-        let turning_on_allow = self.lists_ui.selected == 1 && !self.lists.allow.enabled;
-        if turning_on_allow && self.is_sharing() {
-            self.enable_allowlist_live();
-            return;
+    fn lists_selected(&self) -> usize {
+        match self.lists_ui.focus {
+            FilterJob::Block => self.lists_ui.block_selected,
+            FilterJob::Allow => self.lists_ui.allow_selected,
         }
-        if self.lists_ui.selected == 0 {
-            self.lists.block.enabled = !self.lists.block.enabled;
-            let state = if self.lists.block.enabled {
-                "on"
-            } else {
-                "off"
-            };
-            self.log_info(format!("Blocklist {state}"));
-            self.save_preferences();
-            if self.is_sharing() {
-                self.push_lists_to_resolver(None, None);
+    }
+
+    fn lists_selected_mut(&mut self) -> &mut usize {
+        match self.lists_ui.focus {
+            FilterJob::Block => &mut self.lists_ui.block_selected,
+            FilterJob::Allow => &mut self.lists_ui.allow_selected,
+        }
+    }
+
+    fn clamp_lists_selection(&mut self) {
+        let last = self
+            .column_rows(self.lists_ui.focus)
+            .len()
+            .saturating_sub(1);
+        let selected = self.lists_selected_mut();
+        if *selected > last {
+            *selected = last;
+        }
+    }
+
+    fn handle_lists_add_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char(c) if !c.is_control() => {
+                self.lists_ui.input_buffer.push(c);
             }
-            return;
+            KeyCode::Backspace => {
+                self.lists_ui.input_buffer.pop();
+            }
+            KeyCode::Enter => self.commit_custom_source(),
+            KeyCode::Esc => {
+                self.lists_ui.adding = None;
+                self.lists_ui.input_buffer.clear();
+            }
+            _ => {}
         }
-        self.lists.allow.enabled = false;
-        self.log_info("Allowlist off");
+    }
+
+    fn activate_filter_row(&mut self) {
+        let Some(row) = self
+            .column_rows(self.lists_ui.focus)
+            .get(self.lists_selected())
+            .copied()
+        else {
+            return;
+        };
+        match row {
+            FilterRow::Job(FilterJob::Block) => self.toggle_block_master(),
+            FilterRow::Job(FilterJob::Allow) => self.toggle_allow_master(),
+            FilterRow::Source { job, index } => self.toggle_source(job, index),
+            FilterRow::Add { job } => {
+                self.lists_ui.focus = job;
+                self.lists_ui.adding = Some(job);
+                self.lists_ui.input_buffer.clear();
+            }
+        }
+    }
+
+    fn toggle_block_master(&mut self) {
+        self.lists.block.enabled = !self.lists.block.enabled;
+        let state = if self.lists.block.enabled {
+            "on"
+        } else {
+            "off"
+        };
+        self.log_info(format!("Block {state}"));
         self.save_preferences();
         if self.is_sharing() {
-            self.reload_firewall_without_bypass_async();
+            self.push_lists_to_resolver(None, None);
+        }
+    }
+
+    fn toggle_allow_master(&mut self) {
+        if !self.lists.allow.enabled {
+            if self.is_sharing() {
+                self.enable_allowlist_live();
+                return;
+            }
+            self.lists.allow.enabled = true;
+            self.log_info("WAN bypass on");
+        } else {
+            self.lists.allow.enabled = false;
+            self.log_info("WAN bypass off");
+            if self.is_sharing() {
+                self.save_preferences();
+                self.reload_firewall_without_bypass_async();
+                return;
+            }
+        }
+        self.save_preferences();
+        if self.is_sharing() {
+            self.push_lists_to_resolver(None, None);
+        }
+    }
+
+    fn toggle_source(&mut self, job: FilterJob, index: usize) {
+        let setting = match job {
+            FilterJob::Block => &mut self.lists.block,
+            FilterJob::Allow => &mut self.lists.allow,
+        };
+        let Some(source) = setting.sources.get_mut(index) else {
+            return;
+        };
+        source.enabled = !source.enabled;
+        let label = source.label();
+        let state = if source.enabled { "on" } else { "off" };
+        self.log_info(format!("{label} {state}"));
+        self.save_preferences();
+        self.refresh_lists_async(self.is_sharing());
+    }
+
+    fn remove_selected_custom(&mut self) {
+        let Some(row) = self
+            .column_rows(self.lists_ui.focus)
+            .get(self.lists_selected())
+            .copied()
+        else {
+            return;
+        };
+        let FilterRow::Source { job, index } = row else {
+            return;
+        };
+        let setting = match job {
+            FilterJob::Block => &mut self.lists.block,
+            FilterJob::Allow => &mut self.lists.allow,
+        };
+        let Some(removed) = setting.remove_custom(index) else {
+            self.log_info("Built-in sources stay; disable them instead");
+            return;
+        };
+        self.log_info(format!("Removed {}", removed.label()));
+        self.clamp_lists_selection();
+        self.save_preferences();
+        self.refresh_lists_async(self.is_sharing());
+    }
+
+    fn commit_custom_source(&mut self) {
+        let Some(job) = self.lists_ui.adding else {
+            return;
+        };
+        let url = self.lists_ui.input_buffer.trim().to_string();
+        if url.is_empty() {
+            self.lists_ui.adding = None;
+            self.lists_ui.input_buffer.clear();
+            return;
+        }
+        let setting = match job {
+            FilterJob::Block => &mut self.lists.block,
+            FilterJob::Allow => &mut self.lists.allow,
+        };
+        match setting.add_custom(url.clone()) {
+            Ok(()) => {
+                self.log_success(format!("Added {url}"));
+                self.lists_ui.focus = job;
+                self.lists_ui.adding = None;
+                self.lists_ui.input_buffer.clear();
+                let source_index = match job {
+                    FilterJob::Block => self.lists.block.sources.len().saturating_sub(1),
+                    FilterJob::Allow => self.lists.allow.sources.len().saturating_sub(1),
+                };
+                *self.lists_selected_mut() = source_index + 1;
+                self.save_preferences();
+                self.refresh_lists_async(self.is_sharing());
+            }
+            Err(error) => self.log_warning(error),
         }
     }
 

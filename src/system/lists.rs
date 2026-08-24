@@ -56,13 +56,15 @@ pub struct LoadedList {
     pub errors: Vec<String>,
 }
 
-/// Load every source in `setting`. The caller decides whether a disabled list
-/// should skip I/O (runtime) or still load for UI counts.
+/// Load enabled sources in `setting`. Disabled URLs are skipped.
+/// The job's master `enabled` flag is applied later at resolver-set time
+/// so the UI can still show counts for off jobs.
 ///
 /// Fetch failure uses the on-disk cache when present; otherwise that source
 /// contributes nothing and the error is recorded. Sharing still starts.
 pub async fn load_list(setting: &ListSetting, force: bool) -> LoadedList {
-    if setting.sources.is_empty() {
+    let urls = setting.enabled_urls();
+    if urls.is_empty() {
         return LoadedList::default();
     }
 
@@ -73,7 +75,7 @@ pub async fn load_list(setting: &ListSetting, force: bool) -> LoadedList {
     let max_age = Duration::from_secs(u64::from(setting.refresh_interval_hours) * 3600);
 
     let mut join_set = tokio::task::JoinSet::new();
-    for url in setting.sources.clone() {
+    for url in urls {
         join_set.spawn(async move {
             let result = load_source(&url, max_age, force).await;
             (url, result)

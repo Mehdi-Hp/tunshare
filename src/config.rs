@@ -49,27 +49,192 @@ pub const DEFAULT_BLOCK_MALWARE: &str =
     "https://raw.githubusercontent.com/chocolate4u/Iran-v2ray-rules/release/malware.txt";
 pub const DEFAULT_BLOCK_PHISHING: &str =
     "https://raw.githubusercontent.com/chocolate4u/Iran-v2ray-rules/release/phishing.txt";
+/// HaGeZi Light — ads/trackers. Off until you turn it on (overlaps StevenBlack).
+pub const DEFAULT_BLOCK_HAGEZI_LIGHT: &str =
+    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt";
+/// HaGeZi threat-intel feed (malware/phishing/scam). Off until you turn it on.
+pub const DEFAULT_BLOCK_HAGEZI_TIF: &str =
+    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt";
+/// 1Hosts Lite — ads/trackers. Off until you turn it on.
+pub const DEFAULT_BLOCK_1HOSTS_LITE: &str =
+    "https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/hosts.txt";
+/// Phishing Army. Off until you turn it on.
+pub const DEFAULT_BLOCK_PHISHING_ARMY: &str =
+    "https://phishing.army/download/phishing_army_blocklist.txt";
 /// Iran direct-connect domains — routed out the WAN uplink, not the VPN.
 pub const DEFAULT_ALLOW_IR: &str =
     "https://raw.githubusercontent.com/chocolate4u/Iran-v2ray-rules/release/ir.txt";
+/// China direct-connect domains (Loyalsoldier). Off until you turn it on.
+pub const DEFAULT_ALLOW_CN: &str =
+    "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/china-list.txt";
 
 const DEFAULT_REFRESH_HOURS: u32 = 24;
 
-fn default_block_sources() -> Vec<String> {
-    vec![
-        DEFAULT_BLOCK_STEVENBLACK.into(),
-        DEFAULT_BLOCK_ADS.into(),
-        DEFAULT_BLOCK_MALWARE.into(),
-        DEFAULT_BLOCK_PHISHING.into(),
+struct BundledSource {
+    url: &'static str,
+    default_enabled: bool,
+}
+
+fn builtin_block() -> &'static [BundledSource] {
+    &[
+        BundledSource {
+            url: DEFAULT_BLOCK_STEVENBLACK,
+            default_enabled: true,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_ADS,
+            default_enabled: true,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_MALWARE,
+            default_enabled: true,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_PHISHING,
+            default_enabled: true,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_HAGEZI_LIGHT,
+            default_enabled: false,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_HAGEZI_TIF,
+            default_enabled: false,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_1HOSTS_LITE,
+            default_enabled: false,
+        },
+        BundledSource {
+            url: DEFAULT_BLOCK_PHISHING_ARMY,
+            default_enabled: false,
+        },
     ]
 }
 
-fn default_allow_sources() -> Vec<String> {
-    vec![DEFAULT_ALLOW_IR.into()]
+fn builtin_allow() -> &'static [BundledSource] {
+    &[
+        BundledSource {
+            url: DEFAULT_ALLOW_IR,
+            default_enabled: true,
+        },
+        BundledSource {
+            url: DEFAULT_ALLOW_CN,
+            default_enabled: false,
+        },
+    ]
+}
+
+fn default_block_sources() -> Vec<ListSource> {
+    builtin_block()
+        .iter()
+        .map(|source| ListSource::builtin(source.url, source.default_enabled))
+        .collect()
+}
+
+fn default_allow_sources() -> Vec<ListSource> {
+    builtin_allow()
+        .iter()
+        .map(|source| ListSource::builtin(source.url, source.default_enabled))
+        .collect()
 }
 
 fn default_refresh_hours() -> u32 {
     DEFAULT_REFRESH_HOURS
+}
+
+fn source_enabled_default() -> bool {
+    true
+}
+
+/// Wire format: a bare URL string (legacy) or `{url, enabled}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ListSourceWire {
+    Url(String),
+    Object {
+        url: String,
+        #[serde(default = "source_enabled_default")]
+        enabled: bool,
+    },
+}
+
+impl From<ListSourceWire> for ListSource {
+    fn from(wire: ListSourceWire) -> Self {
+        match wire {
+            ListSourceWire::Url(url) => Self { url, enabled: true },
+            ListSourceWire::Object { url, enabled } => Self { url, enabled },
+        }
+    }
+}
+
+/// One URL in a block or WAN-bypass job. Builtins can be disabled, not deleted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "ListSourceWire")]
+pub struct ListSource {
+    pub url: String,
+    #[serde(default = "source_enabled_default")]
+    pub enabled: bool,
+}
+
+impl ListSource {
+    fn builtin(url: &str, enabled: bool) -> Self {
+        Self {
+            url: url.to_string(),
+            enabled,
+        }
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        is_builtin_url(&self.url)
+    }
+
+    /// Short row label. Builtins get a name; customs show the URL host.
+    pub fn label(&self) -> String {
+        source_label(&self.url)
+    }
+}
+
+pub fn is_builtin_url(url: &str) -> bool {
+    builtin_block()
+        .iter()
+        .chain(builtin_allow())
+        .any(|source| source.url == url)
+}
+
+fn is_http_url(url: &str) -> bool {
+    let url = url.trim();
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+pub fn source_label(url: &str) -> String {
+    match url {
+        DEFAULT_BLOCK_STEVENBLACK => "StevenBlack hosts".into(),
+        DEFAULT_BLOCK_ADS => "IR ads".into(),
+        DEFAULT_BLOCK_MALWARE => "IR malware".into(),
+        DEFAULT_BLOCK_PHISHING => "IR phishing".into(),
+        DEFAULT_BLOCK_HAGEZI_LIGHT => "HaGeZi Light".into(),
+        DEFAULT_BLOCK_HAGEZI_TIF => "HaGeZi TIF".into(),
+        DEFAULT_BLOCK_1HOSTS_LITE => "1Hosts Lite".into(),
+        DEFAULT_BLOCK_PHISHING_ARMY => "Phishing Army".into(),
+        DEFAULT_ALLOW_IR => "IR direct".into(),
+        DEFAULT_ALLOW_CN => "CN direct".into(),
+        other => custom_source_label(other),
+    }
+}
+
+fn custom_source_label(url: &str) -> String {
+    let trimmed = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    if trimmed.chars().count() <= 40 {
+        trimmed.to_string()
+    } else {
+        let mut s: String = trimmed.chars().take(39).collect();
+        s.push('…');
+        s
+    }
 }
 
 /// One URL-driven domain list. `enabled` is off on first run so sharing
@@ -79,7 +244,7 @@ pub struct ListSetting {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: Vec<ListSource>,
     #[serde(default = "default_refresh_hours")]
     pub refresh_interval_hours: u32,
 }
@@ -99,6 +264,57 @@ impl ListSetting {
             sources: default_allow_sources(),
             refresh_interval_hours: DEFAULT_REFRESH_HOURS,
         }
+    }
+
+    pub fn enabled_urls(&self) -> Vec<String> {
+        self.sources
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.url.clone())
+            .collect()
+    }
+
+    pub fn add_custom(&mut self, url: String) -> Result<(), String> {
+        if !is_http_url(&url) {
+            return Err("URL must start with http:// or https://".into());
+        }
+        if self.sources.iter().any(|s| s.url == url) {
+            return Err("that URL is already in this list".into());
+        }
+        self.sources.push(ListSource { url, enabled: true });
+        Ok(())
+    }
+
+    /// Remove a custom source. Builtins stay.
+    pub fn remove_custom(&mut self, index: usize) -> Option<ListSource> {
+        let source = self.sources.get(index)?;
+        if source.is_builtin() {
+            return None;
+        }
+        Some(self.sources.remove(index))
+    }
+
+    fn ensure_builtins(&mut self, builtins: &[BundledSource]) {
+        let existing = std::mem::take(&mut self.sources);
+        let mut by_url = std::collections::HashMap::new();
+        let mut customs = Vec::new();
+        for source in existing {
+            if builtins.iter().any(|bundled| bundled.url == source.url) {
+                by_url.insert(source.url.clone(), source);
+            } else {
+                customs.push(source);
+            }
+        }
+        let mut ordered = Vec::new();
+        for bundled in builtins {
+            ordered.push(
+                by_url
+                    .remove(bundled.url)
+                    .unwrap_or_else(|| ListSource::builtin(bundled.url, bundled.default_enabled)),
+            );
+        }
+        ordered.extend(customs);
+        self.sources = ordered;
     }
 }
 
@@ -236,12 +452,8 @@ impl Config {
     }
 
     fn fill_list_source_defaults(&mut self) {
-        if self.lists.block.sources.is_empty() {
-            self.lists.block.sources = default_block_sources();
-        }
-        if self.lists.allow.sources.is_empty() {
-            self.lists.allow.sources = default_allow_sources();
-        }
+        self.lists.block.ensure_builtins(builtin_block());
+        self.lists.allow.ensure_builtins(builtin_allow());
         if self.lists.block.refresh_interval_hours == 0 {
             self.lists.block.refresh_interval_hours = DEFAULT_REFRESH_HOURS;
         }
@@ -297,14 +509,163 @@ mod tests {
     fn lists_round_trip_preserves_enabled_and_custom_urls() {
         let mut cfg = Config::default();
         cfg.lists.block.enabled = true;
-        cfg.lists.block.sources = vec!["https://example.com/hosts".into()];
+        cfg.lists
+            .block
+            .add_custom("https://example.com/hosts".into())
+            .unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
         assert!(loaded.lists.block.enabled);
-        assert_eq!(
-            loaded.lists.block.sources,
-            vec!["https://example.com/hosts".to_string()]
-        );
+        assert!(loaded
+            .lists
+            .block
+            .sources
+            .iter()
+            .any(|s| s.url == "https://example.com/hosts" && s.enabled));
         assert!(!loaded.lists.allow.enabled);
+        assert_eq!(
+            loaded.lists.block.sources.len(),
+            default_block_sources().len() + 1
+        );
+    }
+
+    #[test]
+    fn legacy_string_sources_migrate_to_enabled_objects() {
+        let json = r#"{
+            "lists": {
+                "block": {
+                    "enabled": true,
+                    "sources": ["https://example.com/hosts"]
+                }
+            }
+        }"#;
+        let mut cfg: Config = serde_json::from_str(json).unwrap();
+        cfg.fill_list_source_defaults();
+        assert!(cfg.lists.block.enabled);
+        assert_eq!(cfg.lists.block.sources[0].url, DEFAULT_BLOCK_STEVENBLACK);
+        assert!(cfg.lists.block.sources[0].enabled);
+        let custom = cfg
+            .lists
+            .block
+            .sources
+            .iter()
+            .find(|s| s.url == "https://example.com/hosts")
+            .unwrap();
+        assert!(custom.enabled);
+        assert!(!custom.is_builtin());
+        assert_eq!(cfg.lists.allow.sources.len(), default_allow_sources().len());
+        assert_eq!(cfg.lists.allow.sources[0].url, DEFAULT_ALLOW_IR);
+        let china = cfg
+            .lists
+            .allow
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_ALLOW_CN)
+            .unwrap();
+        assert!(!china.enabled);
+    }
+
+    #[test]
+    fn enabled_urls_skips_disabled_sources() {
+        let mut setting = ListSetting::block_default();
+        setting.sources[0].enabled = false;
+        let urls = setting.enabled_urls();
+        assert!(!urls.iter().any(|url| url == DEFAULT_BLOCK_STEVENBLACK));
+        assert_eq!(urls.len(), 3);
+    }
+
+    #[test]
+    fn add_custom_rejects_non_http() {
+        let mut setting = ListSetting::block_default();
+        assert!(setting
+            .add_custom("ftp://example.com/hosts".into())
+            .is_err());
+        assert!(setting.add_custom("example.com/hosts".into()).is_err());
+        assert!(setting
+            .add_custom("https://example.com/hosts".into())
+            .is_ok());
+    }
+
+    #[test]
+    fn remove_custom_keeps_builtins() {
+        let mut setting = ListSetting::block_default();
+        setting
+            .add_custom("https://example.com/hosts".into())
+            .unwrap();
+        let custom_idx = setting.sources.len() - 1;
+        assert!(setting.remove_custom(0).is_none());
+        let removed = setting.remove_custom(custom_idx).unwrap();
+        assert_eq!(removed.url, "https://example.com/hosts");
+        assert_eq!(setting.sources.len(), default_block_sources().len());
+    }
+
+    #[test]
+    fn extra_builtins_refill_stay_off() {
+        let json = r#"{
+            "lists": {
+                "block": { "enabled": true, "sources": [] },
+                "allow": { "enabled": false, "sources": [] }
+            }
+        }"#;
+        let mut cfg: Config = serde_json::from_str(json).unwrap();
+        cfg.fill_list_source_defaults();
+        let tif = cfg
+            .lists
+            .block
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_BLOCK_HAGEZI_TIF)
+            .unwrap();
+        assert!(!tif.enabled);
+        let light = cfg
+            .lists
+            .block
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_BLOCK_HAGEZI_LIGHT)
+            .unwrap();
+        assert!(!light.enabled);
+        let hosts = cfg
+            .lists
+            .block
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_BLOCK_1HOSTS_LITE)
+            .unwrap();
+        assert!(!hosts.enabled);
+        let army = cfg
+            .lists
+            .block
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_BLOCK_PHISHING_ARMY)
+            .unwrap();
+        assert!(!army.enabled);
+        assert!(
+            cfg.lists
+                .block
+                .sources
+                .iter()
+                .find(|s| s.url == DEFAULT_BLOCK_STEVENBLACK)
+                .unwrap()
+                .enabled
+        );
+        let china = cfg
+            .lists
+            .allow
+            .sources
+            .iter()
+            .find(|s| s.url == DEFAULT_ALLOW_CN)
+            .unwrap();
+        assert!(!china.enabled);
+        assert!(
+            cfg.lists
+                .allow
+                .sources
+                .iter()
+                .find(|s| s.url == DEFAULT_ALLOW_IR)
+                .unwrap()
+                .enabled
+        );
     }
 }

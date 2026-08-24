@@ -19,7 +19,7 @@ pub enum AppState {
     /// Modal shown after detection completes with at least one missing
     /// prerequisite (no VPN, no wired LAN, or both).
     PreflightBlocked,
-    /// Blocklist / allowlist toggles, counts, and refresh.
+    /// Domain filters: job headers, per-source toggles, custom URLs.
     ViewingLists,
 }
 
@@ -36,6 +36,21 @@ pub enum MenuItem {
     ViewLists,
     RunDoctor,
     Quit,
+}
+
+/// Which Domain filters job a row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterJob {
+    Block,
+    Allow,
+}
+
+/// One selectable row on the Domain filters screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterRow {
+    Job(FilterJob),
+    Source { job: FilterJob, index: usize },
+    Add { job: FilterJob },
 }
 
 /// In-app Doctor screen state.
@@ -65,5 +80,19 @@ impl App {
                 MenuItem::Quit,
             ]
         }
+    }
+
+    pub fn column_rows(&self, job: FilterJob) -> Vec<FilterRow> {
+        let len = match job {
+            FilterJob::Block => self.lists.block.sources.len(),
+            FilterJob::Allow => self.lists.allow.sources.len(),
+        };
+        let mut rows = Vec::with_capacity(len + 2);
+        rows.push(FilterRow::Job(job));
+        for index in 0..len {
+            rows.push(FilterRow::Source { job, index });
+        }
+        rows.push(FilterRow::Add { job });
+        rows
     }
 }
