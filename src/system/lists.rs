@@ -107,6 +107,32 @@ pub async fn load_list(setting: &ListSetting, force: bool) -> LoadedList {
     }
 }
 
+/// Parse enabled sources from on-disk cache only. No network.
+pub fn load_cached_list(setting: &ListSetting) -> LoadedList {
+    let mut names = HashSet::new();
+    let mut last_fetch: Option<SystemTime> = None;
+    let mut errors = Vec::new();
+    for url in setting.enabled_urls() {
+        let Ok(path) = cache_path(&url) else {
+            errors.push(format!("{url}: cannot resolve cache path"));
+            continue;
+        };
+        match read_cache(&path) {
+            Some((body, fetched_at)) => {
+                parse_list_body(&body, &mut names);
+                last_fetch = Some(last_fetch.map(|t| t.max(fetched_at)).unwrap_or(fetched_at));
+            }
+            None => errors.push(format!("{url}: no cache")),
+        }
+    }
+    LoadedList {
+        set: DomainSet::new(names),
+        last_fetch,
+        used_stale: false,
+        errors,
+    }
+}
+
 struct CachedSource {
     body: String,
     fetched_at: SystemTime,

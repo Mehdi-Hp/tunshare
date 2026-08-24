@@ -16,6 +16,13 @@ build:
 run: build
     sudo ./target/debug/tunshare
 
+# Live sharing inspect. Always rebuilds, then sudo like `just run`.
+# Flags go after `--` so just does not swallow them:
+#   just status
+#   just status -- --check digikala.com
+status *args: build
+    sudo ./target/debug/tunshare status {{args}}
+
 # Run clippy.
 lint:
     cargo clippy --all-targets

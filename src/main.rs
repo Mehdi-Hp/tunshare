@@ -9,6 +9,7 @@ mod doctor;
 mod error;
 mod health;
 mod session;
+mod status;
 mod system;
 mod ui;
 
@@ -57,6 +58,10 @@ async fn main() -> Result<()> {
             "--doctor" => {
                 return run_doctor_cli().await;
             }
+            "status" | "--status" => {
+                let rest: Vec<String> = args.collect();
+                return run_status_cli(rest).await;
+            }
             other => {
                 eprintln!("tunshare: unknown argument: {other}");
                 eprintln!();
@@ -101,12 +106,16 @@ fn print_help() {
         "tunshare {} - VPN sharing TUI for macOS
 
 USAGE:
-    sudo tunshare           Launch the TUI (requires root)
+    sudo tunshare                     Launch the TUI (requires root)
+    sudo tunshare status              Live sharing snapshot
+    sudo tunshare status --check NAME Probe Block / WAN bypass for NAME
 
 OPTIONS:
     -h, --help              Show this help and exit
     -V, --version           Print version and exit
         --doctor            Run diagnostic checks and exit (non-zero on failure)
+    status                  Live sharing inspect (pf, process, lists)
+        --check NAME        Resolve NAME via LAN DNS and verify bypass table
 
 Routes internet traffic through a VPN and shares it via LAN.
 Project home: {}",
@@ -157,6 +166,22 @@ async fn run_doctor_cli() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+async fn run_status_cli(args: Vec<String>) -> Result<()> {
+    match crate::status::run_status_cli(args).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let text = error.to_string();
+            eprintln!("tunshare: {text}");
+            if text.contains("unknown argument") || text.contains("--check needs") {
+                eprintln!();
+                print_help();
+                std::process::exit(2);
+            }
+            Err(error.into())
+        }
+    }
 }
 
 async fn run_app() -> Result<()> {

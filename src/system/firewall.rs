@@ -290,6 +290,38 @@ anchor "natpmp"
             .args(["-t", BYPASS_TABLE, "-T", "flush"])
             .output();
     }
+
+    /// Addresses currently in `<tunshare_bypass>`. `None` when the table
+    /// is missing (bypass rules were never loaded).
+    pub fn table_show() -> Result<Option<Vec<Ipv4Addr>>> {
+        let output = SyncCommand::new("pfctl")
+            .args(["-t", BYPASS_TABLE, "-T", "show"])
+            .output()
+            .map_err(|error| TunshareError::CommandFailed {
+                command: format!("pfctl -t {BYPASS_TABLE} -T show"),
+                message: error.to_string(),
+            })?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if stderr.to_ascii_lowercase().contains("does not exist")
+                || stderr.to_ascii_lowercase().contains("no such table")
+            {
+                return Ok(None);
+            }
+            if stderr.contains("Permission denied") || stderr.contains("Operation not permitted") {
+                return Err(TunshareError::PermissionDenied);
+            }
+            return Err(TunshareError::FirewallError(format!(
+                "pfctl -T show failed: {}",
+                stderr.trim()
+            )));
+        }
+        let ips = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<Ipv4Addr>().ok())
+            .collect();
+        Ok(Some(ips))
+    }
 }
 
 fn pfctl_table(args: &[String]) -> Result<()> {

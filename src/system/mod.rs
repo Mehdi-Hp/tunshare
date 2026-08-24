@@ -16,7 +16,7 @@ pub use brew::brew_installed;
 pub use dhcp::DhcpServer;
 pub use dns::discover_vpn_dns;
 pub use firewall::{BypassConfig, Firewall};
-pub use lists::{load_list, DomainSet, LoadedList};
+pub use lists::{load_cached_list, load_list, DomainSet, LoadedList};
 pub use natpmp::NatPmpServer;
 pub use network::{
     default_route_interface, detect_lan_interfaces, detect_vpn_interfaces, detect_wan_uplink,

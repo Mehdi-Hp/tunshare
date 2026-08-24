@@ -81,6 +81,19 @@ The binary is at `./target/release/tunshare`.
 sudo tunshare
 ```
 
+### Status (no TUI)
+
+Inspect a running (or leftover) session from another terminal. Same binary, no checkout required.
+
+```bash
+sudo tunshare status
+sudo tunshare status --check digikala.com
+```
+
+`--doctor` is preflight (can I start). `status` is live: process + pf NAT/rdr + WAN bypass table + list cache. `--check NAME` classifies NAME against cached lists, queries the LAN resolver, and for WAN-bypass names expects the A records in `<tunshare_bypass>`.
+
+Exit `0` when the snapshot is consistent (sharing on and pf matches, or TUI down with no leftover NAT). `1` on leftover rules, TUI-without-sharing, or a name on neither list. `2` when the name is listed but the probe failed.
+
 ### Keyboard shortcuts
 
 | Key | Action |
