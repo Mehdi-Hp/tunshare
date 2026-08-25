@@ -1,8 +1,8 @@
 //! In-process DNS server for LAN clients.
 //!
 //! Binds the LAN IPv4 on :53 (UDP + TCP). Decision tree:
-//! block suffix → NXDOMAIN; allow suffix → WAN upstream, then pf table add,
-//! then answer; else → VPN-path upstream (`custom` or 1.1.1.1).
+//! block suffix → NXDOMAIN; allow suffix → WAN gateway :53 (BoundIf), then
+//! pf table add, then answer; else → VPN-path upstream (`custom` or 1.1.1.1).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -44,7 +44,6 @@ pub struct DnsServer {
     shutdown_tx: watch::Sender<bool>,
     lists: Arc<RwLock<ResolverLists>>,
     wan_upstream: Arc<std::sync::RwLock<Option<Resolver<BoundIfProvider>>>>,
-    wan_dns: Vec<String>,
 }
 
 impl DnsServer {
@@ -52,7 +51,6 @@ impl DnsServer {
     pub async fn start(
         lan_ip: Ipv4Addr,
         vpn_dns: Vec<String>,
-        wan_dns: Vec<String>,
         wan: Option<&WanUplink>,
         lists: ResolverLists,
     ) -> Result<Self> {
@@ -66,7 +64,7 @@ impl DnsServer {
 
         let vpn_upstream = build_vpn_resolver(&vpn_dns)?;
         let wan_resolver = match wan {
-            Some(wan) => Some(build_wan_resolver(&wan_dns, wan)?),
+            Some(wan) => Some(build_wan_resolver(wan)?),
             None => None,
         };
         let wan_upstream = Arc::new(std::sync::RwLock::new(wan_resolver));
@@ -90,7 +88,6 @@ impl DnsServer {
             shutdown_tx,
             lists,
             wan_upstream,
-            wan_dns,
         })
     }
 
@@ -100,7 +97,7 @@ impl DnsServer {
 
     /// Bind a WAN-path resolver. Needed when allowlist turns on after sharing started.
     pub fn attach_wan(&self, wan: &WanUplink) -> Result<()> {
-        let resolver = build_wan_resolver(&self.wan_dns, wan)?;
+        let resolver = build_wan_resolver(wan)?;
         let mut slot = self
             .wan_upstream
             .write()
@@ -165,9 +162,12 @@ fn build_vpn_resolver(servers: &[String]) -> Result<Resolver<TokioRuntimeProvide
         .map_err(|error| TunshareError::Resolver(error.to_string()))
 }
 
-fn build_wan_resolver(servers: &[String], wan: &WanUplink) -> Result<Resolver<BoundIfProvider>> {
+fn build_wan_resolver(wan: &WanUplink) -> Result<Resolver<BoundIfProvider>> {
+    // Some WAN uplinks block public resolvers (1.1.1.1, 8.8.8.8) and DoH.
+    // The default-route gateway is the DNS that still answers.
     let provider = BoundIfProvider::new(&wan.iface, wan.ip)?;
-    let mut builder = Resolver::builder_with_config(resolver_config(servers), provider);
+    let mut builder =
+        Resolver::builder_with_config(resolver_config(&[wan.gateway.to_string()]), provider);
     builder.options_mut().ndots = 0;
     builder
         .build()

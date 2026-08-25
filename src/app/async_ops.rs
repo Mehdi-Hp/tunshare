@@ -888,11 +888,6 @@ impl App {
         let lan_ip = session.lan_ip;
         let wan = session.wan.clone();
         let vpn_dns = self.dns.effective();
-        let wan_dns = if self.dns.system_servers.is_empty() {
-            vec!["1.1.1.1".to_string()]
-        } else {
-            self.dns.system_servers.clone()
-        };
         let block_setting = self.lists.block.clone();
         let allow_setting = self.lists.allow.clone();
         self.set_pending_op(PendingOp::StartingResolver);
@@ -918,8 +913,7 @@ impl App {
                     block_enabled: block_setting.enabled,
                     allow_enabled: allow_setting.enabled,
                 };
-                let server =
-                    DnsServer::start(lan_ip, vpn_dns, wan_dns, wan.as_ref(), lists).await?;
+                let server = DnsServer::start(lan_ip, vpn_dns, wan.as_ref(), lists).await?;
                 Ok((server, block, allow))
             })
             .await;
