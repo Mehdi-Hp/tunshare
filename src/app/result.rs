@@ -76,7 +76,8 @@ impl App {
             AsyncOpResult::HealthCheck {
                 status,
                 default_iface,
-            } => self.handle_health_result(status, default_iface),
+                healed,
+            } => self.handle_health_result(status, default_iface, healed),
             AsyncOpResult::TrafficSample { result } => self.handle_traffic_sample(result),
             AsyncOpResult::DoctorFinished { results } => self.on_doctor_finished(results),
             AsyncOpResult::DoctorAnchorFlushed { result } => self.on_doctor_anchor_flushed(result),
@@ -694,7 +695,15 @@ impl App {
 
     /// Apply a health-check result: log transitions, track Down windows,
     /// reschedule the next check, and auto-stop if the wait window has elapsed.
-    fn handle_health_result(&mut self, status: HealthStatus, default_iface: Option<String>) {
+    fn handle_health_result(
+        &mut self,
+        status: HealthStatus,
+        default_iface: Option<String>,
+        healed: bool,
+    ) {
+        if healed {
+            self.log_success("Restored pf hooks (route-to was missing)");
+        }
         // Detect VPN-swap before mutating health state. If the default
         // route now points at a *different* utun than our session is
         // bound to, the user switched providers/protocols — kick off a

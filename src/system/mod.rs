@@ -16,7 +16,7 @@ pub mod traffic;
 pub use brew::brew_installed;
 pub use dhcp::DhcpServer;
 pub use dns::discover_vpn_dns;
-pub use firewall::{BypassConfig, Firewall};
+pub use firewall::{BypassConfig, Firewall, PfContract};
 pub use lists::{load_cached_list, load_list, DomainSet, LoadedList};
 pub use natpmp::NatPmpServer;
 pub use network::{

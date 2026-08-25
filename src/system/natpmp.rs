@@ -17,7 +17,7 @@ use tokio::sync::watch;
 const NATPMP_PORT: u16 = 5351;
 /// RFC 6886: response opcode = request opcode + 128.
 const RESPONSE_FLAG: u8 = 128;
-const PF_ANCHOR_NAME: &str = "natpmp";
+const PF_ANCHOR_NAME: &str = crate::system::firewall::NATPMP_ANCHOR;
 const MAX_LIFETIME: u32 = 7200;
 const MIN_ALLOWED_PORT: u16 = 1024;
 
@@ -503,6 +503,11 @@ async fn flush_anchor_rules() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_under_com_tunshare() {
+        assert_eq!(PF_ANCHOR_NAME, "com.tunshare/natpmp");
+    }
 
     #[test]
     fn test_network_from_ip() {

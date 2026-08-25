@@ -34,7 +34,7 @@ pub(super) const TIMEOUT_START_DHCP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_START_NATPMP: Duration = Duration::from_secs(5);
 pub(super) const TIMEOUT_STOP_SHARING: Duration = Duration::from_secs(10);
 pub(super) const TIMEOUT_DEBUG_INFO: Duration = Duration::from_secs(5);
-pub(super) const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(3);
+pub(super) const TIMEOUT_HEALTH_CHECK: Duration = Duration::from_secs(15);
 pub(super) const TIMEOUT_TRAFFIC_SAMPLE: Duration = Duration::from_secs(2);
 
 /// `brew install dnsmasq` can be slow: cold tap update, formula download,
@@ -137,6 +137,8 @@ pub enum AsyncOpResult {
         /// default route or `route(8)` failed; both are treated as
         /// "don't reload" — the existing VPN-down path takes over.
         default_iface: Option<String>,
+        /// pf contract was missing and restore brought it back.
+        healed: bool,
     },
     /// Periodic byte-counter sample for the VPN interface. `Err` is treated
     /// as a transient blip — we just skip the sample.
@@ -601,21 +603,50 @@ impl App {
 
         let tx = self.op_tx.clone();
         let vpn_name = session.upstream.name.clone();
+        let skip_heal = matches!(
+            self.pending_op,
+            Some(
+                PendingOp::ReloadingFirewall
+                    | PendingOp::ReloadingUpstream
+                    | PendingOp::StartingSharing
+                    | PendingOp::StoppingSharing
+            )
+        );
+        let heal = if skip_heal {
+            None
+        } else {
+            let bypass = session.wan.as_ref().map(|wan| BypassConfig {
+                wan_if: wan.iface.clone(),
+                wan_gw: wan.gateway,
+            });
+            Some(health::HealPlan {
+                vpn_if: session.upstream.name.clone(),
+                lan_if: session.lan_name.clone(),
+                lan_ip: session.lan_ip,
+                mss: session.upstream.mss_v4(),
+                bypass_on: self.lists.allow.enabled && bypass.is_some(),
+                bypass,
+            })
+        };
         self.next_health_check = Some(Instant::now() + HEALTH_CHECK_INTERVAL);
 
         tokio::spawn(async move {
             let probe = timeout(TIMEOUT_HEALTH_CHECK, async {
-                let (status, default_iface) = tokio::join!(
-                    health::check_health(&vpn_name),
+                let (health_pair, default_iface) = tokio::join!(
+                    health::check_health_with_heal(&vpn_name, heal.as_ref()),
                     crate::system::default_route_interface(),
                 );
-                (status, default_iface.ok().flatten())
+                let (status, healed) = health_pair;
+                (status, default_iface.ok().flatten(), healed)
             })
             .await;
-            let (status, default_iface) = probe.unwrap_or((HealthStatus::Healthy, None)); // Timeout = assume OK
+            // Timeout = assume OK rather than false-alarming a hung pfctl.
+            let (status, default_iface, healed) =
+                probe.unwrap_or((HealthStatus::Healthy, None, false));
             let _ = tx.send(AsyncOpResult::HealthCheck {
                 status,
                 default_iface,
+                healed,
             });
         });
     }

@@ -14,7 +14,7 @@ use hickory_resolver::Resolver;
 use crate::config::Config;
 use crate::error::{Result, TunshareError};
 use crate::system::lists::LoadedList;
-use crate::system::{load_cached_list, Firewall, IpForwarding};
+use crate::system::{load_cached_list, Firewall, IpForwarding, PfContract};
 
 const LABEL_WIDTH: usize = 16;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,17 +35,7 @@ enum SharingState {
     NeedRoot,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct LivePf {
-    vpn: Option<String>,
-    lan: Option<String>,
-    lan_ip: Option<Ipv4Addr>,
-    wan: Option<String>,
-    wan_gw: Option<Ipv4Addr>,
-    has_dns_rdr: bool,
-    has_bypass_nat: bool,
-    has_route_to: bool,
-}
+type LivePf = PfContract;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckOutcome {
@@ -126,12 +116,15 @@ impl Snapshot {
                 out.push("tunshare NAT is loaded but no tunshare process (leftover rules)".into());
             }
             SharingState::Running => {
-                if self.config.lists.allow.enabled {
-                    if let Some(pf) = self.pf.as_ref() {
-                        if !pf.has_bypass_nat || !pf.has_route_to {
-                            out.push(
-                                "WAN bypass is on in prefs but pf has no route-to / WAN NAT".into(),
-                            );
+                if let Some(pf) = self.pf.as_ref() {
+                    if !pf.has_main_hooks {
+                        out.push("MAIN is missing com.tunshare hooks".into());
+                    }
+                    if self.config.lists.allow.enabled {
+                        if let Some(message) = pf.miss_message(true) {
+                            if message != "MAIN is missing com.tunshare hooks" {
+                                out.push(message.to_string());
+                            }
                         }
                         if pf.wan.is_none() {
                             out.push("WAN bypass is on but no WAN uplink in loaded rules".into());
@@ -205,8 +198,7 @@ async fn load_live_pf() -> Result<LivePf> {
     if !is_root() {
         return Err(TunshareError::PermissionDenied);
     }
-    let nat = Firewall::get_current_rules().await.map_err(map_pf_perm)?;
-    Ok(parse_pf(&nat))
+    Firewall::inspect_live().await.map_err(map_pf_perm)
 }
 
 fn is_root() -> bool {
@@ -609,116 +601,6 @@ fn lan_resolver(lan_ip: Ipv4Addr) -> Result<Resolver<TokioRuntimeProvider>> {
         .map_err(|error| TunshareError::Resolver(error.to_string()))
 }
 
-fn parse_pf(text: &str) -> LivePf {
-    let mut pf = LivePf::default();
-    parse_pf_macros(text, &mut pf);
-    let expanded = expand_pf_macros(text);
-    for line in expanded.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("rdr ") {
-            if let Some((iface, ip)) = parse_dns_rdr(rest) {
-                pf.lan = Some(iface);
-                pf.lan_ip = Some(ip);
-                pf.has_dns_rdr = true;
-            }
-        } else if let Some(rest) = line.strip_prefix("nat on ") {
-            parse_nat_line(rest, &mut pf);
-        } else if line.contains("route-to") && line.contains("tunshare_bypass") {
-            pf.has_route_to = true;
-            if let Some((iface, gw)) = parse_route_to(line) {
-                pf.wan = Some(iface);
-                pf.wan_gw = Some(gw);
-            }
-        }
-    }
-    pf
-}
-
-fn parse_pf_macros(text: &str, pf: &mut LivePf) {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((name, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        if name.contains(' ') || value.is_empty() {
-            continue;
-        }
-        match name {
-            "ext_if" if pf.vpn.is_none() => pf.vpn = Some(value),
-            "int_if" if pf.lan.is_none() => pf.lan = Some(value),
-            "wan_if" if pf.wan.is_none() => pf.wan = Some(value),
-            "wan_gw" if pf.wan_gw.is_none() => pf.wan_gw = value.parse().ok(),
-            _ => {}
-        }
-    }
-}
-
-fn expand_pf_macros(text: &str) -> String {
-    let mut out = text.to_string();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((name, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        if name.is_empty() || value.is_empty() || name.contains(' ') {
-            continue;
-        }
-        out = out.replace(&format!("${name}"), &value);
-    }
-    out
-}
-
-fn parse_dns_rdr(rest: &str) -> Option<(String, Ipv4Addr)> {
-    if !rest.contains("port") || !rest.contains("53") {
-        return None;
-    }
-    let iface = iface_after_on(rest)?;
-    let ip = rest
-        .rsplit("->")
-        .next()?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    Some((iface, ip))
-}
-
-fn parse_nat_line(rest: &str, pf: &mut LivePf) {
-    let Some(iface) = rest.split_whitespace().next().map(str::to_string) else {
-        return;
-    };
-    let to_bypass =
-        rest.contains("to <tunshare_bypass>") || rest.contains("to < tunshare_bypass >");
-    let to_not_bypass = rest.contains("to ! <tunshare_bypass>") || rest.contains("to ! <");
-    if to_bypass && !to_not_bypass {
-        pf.has_bypass_nat = true;
-        pf.wan = Some(iface);
-    } else if pf.vpn.is_none() {
-        pf.vpn = Some(iface);
-    }
-}
-
-fn parse_route_to(line: &str) -> Option<(String, Ipv4Addr)> {
-    let rest = line.split("route-to").nth(1)?;
-    let inner = rest.split('(').nth(1)?.split(')').next()?.trim();
-    let mut parts = inner.split_whitespace();
-    let iface = parts.next()?.to_string();
-    let gw = parts.next()?.parse().ok()?;
-    Some((iface, gw))
-}
-
 fn sharing_state(has_tui: bool, has_rdr: Option<bool>) -> SharingState {
     match (has_tui, has_rdr) {
         (_, None) => SharingState::NeedRoot,
@@ -727,16 +609,6 @@ fn sharing_state(has_tui: bool, has_rdr: Option<bool>) -> SharingState {
         (false, Some(true)) => SharingState::Leftover,
         (false, Some(false)) => SharingState::Stopped,
     }
-}
-
-fn iface_after_on(text: &str) -> Option<String> {
-    let mut parts = text.split_whitespace();
-    while let Some(tok) = parts.next() {
-        if tok == "on" {
-            return parts.next().map(str::to_string);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -761,14 +633,14 @@ mod tests {
             wan_if: "en0".into(),
             wan_gw: Ipv4Addr::new(192, 168, 1, 1),
         };
-        let rules = Firewall::generate_rules(
+        let body = Firewall::generate_rules(
             "utun10",
             "en8",
             Ipv4Addr::new(192, 168, 2, 1),
             1400,
             Some(&bypass),
         );
-        let pf = parse_pf(&rules);
+        let pf = Firewall::contract_from_text(&Firewall::generate_main_hooks(), &body);
         assert_eq!(pf.vpn.as_deref(), Some("utun10"));
         assert_eq!(pf.lan.as_deref(), Some("en8"));
         assert_eq!(pf.lan_ip, Some(Ipv4Addr::new(192, 168, 2, 1)));
@@ -777,18 +649,45 @@ mod tests {
         assert!(pf.has_dns_rdr);
         assert!(pf.has_bypass_nat);
         assert!(pf.has_route_to);
+        assert!(pf.has_main_hooks);
+        assert!(pf.bypass_ok());
     }
 
     #[test]
     fn parse_generated_rules_without_bypass() {
-        let rules =
+        let body =
             Firewall::generate_rules("utun10", "en8", Ipv4Addr::new(192, 168, 2, 1), 1400, None);
-        let pf = parse_pf(&rules);
+        let pf = Firewall::contract_from_text(&Firewall::generate_main_hooks(), &body);
         assert_eq!(pf.vpn.as_deref(), Some("utun10"));
         assert!(pf.has_dns_rdr);
         assert!(!pf.has_bypass_nat);
         assert!(!pf.has_route_to);
         assert!(pf.wan.is_none());
+        assert!(pf.sharing_ok());
+        assert!(!pf.bypass_ok());
+    }
+
+    #[test]
+    fn unhooked_main_plus_body_is_status_mismatch() {
+        let bypass = BypassConfig {
+            wan_if: "en0".into(),
+            wan_gw: Ipv4Addr::new(192, 168, 1, 1),
+        };
+        let body = Firewall::generate_rules(
+            "utun10",
+            "en8",
+            Ipv4Addr::new(192, 168, 2, 1),
+            1400,
+            Some(&bypass),
+        );
+        let pf = Firewall::contract_from_text("", &body);
+        assert!(pf.has_dns_rdr && pf.has_route_to);
+        assert!(!pf.has_main_hooks);
+        assert!(!pf.bypass_ok());
+        assert_eq!(
+            pf.miss_message(true),
+            Some("MAIN is missing com.tunshare hooks")
+        );
     }
 
     #[test]
@@ -801,7 +700,10 @@ rdr on en8 inet proto udp from 192.168.2.0/24 to any port = 53 -> 192.168.2.1
         let filter = r#"
 pass in quick on en8 route-to (en0 192.168.1.1) inet from 192.168.2.0/24 to <tunshare_bypass> keep state
 "#;
-        let pf = parse_pf(&format!("{nat}\n{filter}"));
+        let pf = Firewall::contract_from_text(
+            &Firewall::generate_main_hooks(),
+            &format!("{nat}\n{filter}"),
+        );
         assert_eq!(pf.vpn.as_deref(), Some("utun10"));
         assert_eq!(pf.lan.as_deref(), Some("en8"));
         assert_eq!(pf.lan_ip, Some(Ipv4Addr::new(192, 168, 2, 1)));
@@ -809,6 +711,7 @@ pass in quick on en8 route-to (en0 192.168.1.1) inet from 192.168.2.0/24 to <tun
         assert_eq!(pf.wan_gw, Some(Ipv4Addr::new(192, 168, 1, 1)));
         assert!(pf.has_route_to);
         assert!(pf.has_bypass_nat);
+        assert!(pf.has_main_hooks);
     }
 
     #[test]
