@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, FilterJob, FilterRow};
+use crate::app::{AddSourceField, App, FilterJob, FilterRow};
 use crate::config::ListSetting;
 use crate::ui::theme::{borders, colors, styles, symbols};
 use crate::ui::widgets::Card;
@@ -301,7 +301,7 @@ fn render_add_overlay(frame: &mut Frame, area: Rect, app: &App) {
         None => "list",
     };
     let width = area.width.min(56);
-    let height = 7.min(area.height);
+    let height = 9.min(area.height);
     let overlay = Rect::new(
         area.x + (area.width.saturating_sub(width)) / 2,
         area.y + (area.height.saturating_sub(height)) / 2,
@@ -326,24 +326,52 @@ fn render_add_overlay(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Paste an http:// or https:// URL",
+            "Tab switches fields. Name is optional.",
             Style::default().fg(colors::TEXT_SECONDARY),
         ))),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
 
-    let input_display = format!("{}█", app.lists_ui.input_buffer);
+    paint_field(
+        frame,
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        "Name",
+        &app.lists_ui.name_buffer,
+        app.lists_ui.add_focus == AddSourceField::Name,
+    );
+    paint_field(
+        frame,
+        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+        "URL ",
+        &app.lists_ui.url_buffer,
+        app.lists_ui.add_focus == AddSourceField::Url,
+    );
+}
+
+fn paint_field(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool) {
+    let display = if focused {
+        format!("{value}█")
+    } else {
+        value.to_string()
+    };
+    let value_style = if focused {
+        Style::default()
+            .fg(colors::TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors::TEXT_PRIMARY)
+    };
+    let label_style = if focused {
+        styles::selected()
+    } else {
+        Style::default().fg(colors::TEXT_SECONDARY)
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("URL: ", Style::default().fg(colors::TEXT_SECONDARY)),
-            Span::styled(
-                input_display,
-                Style::default()
-                    .fg(colors::TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(display, value_style),
         ])),
-        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        area,
     );
 }
 

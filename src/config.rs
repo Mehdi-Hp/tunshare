@@ -147,7 +147,11 @@ fn source_enabled_default() -> bool {
     true
 }
 
-/// Wire format: a bare URL string (legacy) or `{url, enabled}`.
+fn skip_empty_name(name: &Option<String>) -> bool {
+    name.as_ref().is_none_or(|s| s.is_empty())
+}
+
+/// Wire format: a bare URL string (legacy) or `{url, enabled, name}`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum ListSourceWire {
@@ -156,14 +160,24 @@ enum ListSourceWire {
         url: String,
         #[serde(default = "source_enabled_default")]
         enabled: bool,
+        #[serde(default)]
+        name: Option<String>,
     },
 }
 
 impl From<ListSourceWire> for ListSource {
     fn from(wire: ListSourceWire) -> Self {
         match wire {
-            ListSourceWire::Url(url) => Self { url, enabled: true },
-            ListSourceWire::Object { url, enabled } => Self { url, enabled },
+            ListSourceWire::Url(url) => Self {
+                url,
+                enabled: true,
+                name: None,
+            },
+            ListSourceWire::Object { url, enabled, name } => Self {
+                url,
+                enabled,
+                name: name.filter(|s| !s.is_empty()),
+            },
         }
     }
 }
@@ -175,6 +189,9 @@ pub struct ListSource {
     pub url: String,
     #[serde(default = "source_enabled_default")]
     pub enabled: bool,
+    /// Custom display name. Builtins ignore this and keep baked labels.
+    #[serde(default, skip_serializing_if = "skip_empty_name")]
+    pub name: Option<String>,
 }
 
 impl ListSource {
@@ -182,6 +199,7 @@ impl ListSource {
         Self {
             url: url.to_string(),
             enabled,
+            name: None,
         }
     }
 
@@ -189,8 +207,18 @@ impl ListSource {
         is_builtin_url(&self.url)
     }
 
-    /// Short row label. Builtins get a name; customs show the URL host.
+    /// Short row label. Named customs win; builtins keep baked names.
     pub fn label(&self) -> String {
+        if !self.is_builtin() {
+            if let Some(name) = self
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return name.to_string();
+            }
+        }
         source_label(&self.url)
     }
 }
@@ -274,14 +302,19 @@ impl ListSetting {
             .collect()
     }
 
-    pub fn add_custom(&mut self, url: String) -> Result<(), String> {
+    pub fn add_custom(&mut self, url: String, name: Option<String>) -> Result<(), String> {
         if !is_http_url(&url) {
             return Err("URL must start with http:// or https://".into());
         }
         if self.sources.iter().any(|s| s.url == url) {
             return Err("that URL is already in this list".into());
         }
-        self.sources.push(ListSource { url, enabled: true });
+        let name = name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        self.sources.push(ListSource {
+            url,
+            enabled: true,
+            name,
+        });
         Ok(())
     }
 
@@ -511,7 +544,7 @@ mod tests {
         cfg.lists.block.enabled = true;
         cfg.lists
             .block
-            .add_custom("https://example.com/hosts".into())
+            .add_custom("https://example.com/hosts".into(), None)
             .unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
@@ -552,6 +585,7 @@ mod tests {
             .find(|s| s.url == "https://example.com/hosts")
             .unwrap();
         assert!(custom.enabled);
+        assert!(custom.name.is_none());
         assert!(!custom.is_builtin());
         assert_eq!(cfg.lists.allow.sources.len(), default_allow_sources().len());
         assert_eq!(cfg.lists.allow.sources[0].url, DEFAULT_ALLOW_IR);
@@ -578,11 +612,13 @@ mod tests {
     fn add_custom_rejects_non_http() {
         let mut setting = ListSetting::block_default();
         assert!(setting
-            .add_custom("ftp://example.com/hosts".into())
+            .add_custom("ftp://example.com/hosts".into(), None)
             .is_err());
-        assert!(setting.add_custom("example.com/hosts".into()).is_err());
         assert!(setting
-            .add_custom("https://example.com/hosts".into())
+            .add_custom("example.com/hosts".into(), None)
+            .is_err());
+        assert!(setting
+            .add_custom("https://example.com/hosts".into(), None)
             .is_ok());
     }
 
@@ -590,13 +626,43 @@ mod tests {
     fn remove_custom_keeps_builtins() {
         let mut setting = ListSetting::block_default();
         setting
-            .add_custom("https://example.com/hosts".into())
+            .add_custom("https://example.com/hosts".into(), None)
             .unwrap();
         let custom_idx = setting.sources.len() - 1;
         assert!(setting.remove_custom(0).is_none());
         let removed = setting.remove_custom(custom_idx).unwrap();
         assert_eq!(removed.url, "https://example.com/hosts");
         assert_eq!(setting.sources.len(), default_block_sources().len());
+    }
+
+    #[test]
+    fn named_custom_round_trips_and_labels() {
+        let mut setting = ListSetting::block_default();
+        setting
+            .add_custom(
+                "https://example.com/hosts".into(),
+                Some("  Ads extra  ".into()),
+            )
+            .unwrap();
+        let custom = setting.sources.last().unwrap();
+        assert_eq!(custom.name.as_deref(), Some("Ads extra"));
+        assert_eq!(custom.label(), "Ads extra");
+        let json = serde_json::to_string(&setting).unwrap();
+        assert!(json.contains("\"name\":\"Ads extra\""));
+        let loaded: ListSetting = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.sources.last().unwrap().label(), "Ads extra");
+
+        setting
+            .add_custom("https://example.com/other".into(), Some("   ".into()))
+            .unwrap();
+        assert!(setting.sources.last().unwrap().name.is_none());
+        assert_eq!(
+            setting.sources.last().unwrap().label(),
+            custom_source_label("https://example.com/other")
+        );
+
+        setting.sources[0].name = Some("ignored on builtin".into());
+        assert_eq!(setting.sources[0].label(), "StevenBlack hosts");
     }
 
     #[test]

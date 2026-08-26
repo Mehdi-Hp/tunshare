@@ -13,7 +13,7 @@ use crate::config::{LanMtu, MTU_MAX, MTU_MIN};
 use super::dns::{DnsEditMode, DNS_PRESETS};
 use super::mtu::{MtuEditMode, Preset as MtuPreset, PRESETS as MTU_PRESETS};
 use super::state::{FilterJob, FilterRow, MenuItem};
-use super::{App, AppState};
+use super::{AddSourceField, App, AppState};
 
 impl App {
     /// Main keyboard dispatch.
@@ -523,7 +523,9 @@ impl App {
         self.lists_ui.block_selected = 0;
         self.lists_ui.allow_selected = 0;
         self.lists_ui.adding = None;
-        self.lists_ui.input_buffer.clear();
+        self.lists_ui.add_focus = AddSourceField::Url;
+        self.lists_ui.name_buffer.clear();
+        self.lists_ui.url_buffer.clear();
         self.state = AppState::ViewingLists;
         if self.lists_ui.block_count == 0 && self.lists_ui.allow_count == 0 {
             self.refresh_lists_async(false);
@@ -594,18 +596,39 @@ impl App {
 
     fn handle_lists_add_key(&mut self, key: KeyCode) {
         match key {
+            KeyCode::Tab | KeyCode::Down => {
+                self.lists_ui.add_focus = match self.lists_ui.add_focus {
+                    AddSourceField::Name => AddSourceField::Url,
+                    AddSourceField::Url => AddSourceField::Name,
+                };
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.lists_ui.add_focus = match self.lists_ui.add_focus {
+                    AddSourceField::Name => AddSourceField::Url,
+                    AddSourceField::Url => AddSourceField::Name,
+                };
+            }
             KeyCode::Char(c) if !c.is_control() => {
-                self.lists_ui.input_buffer.push(c);
+                self.add_buffer_mut().push(c);
             }
             KeyCode::Backspace => {
-                self.lists_ui.input_buffer.pop();
+                self.add_buffer_mut().pop();
             }
             KeyCode::Enter => self.commit_custom_source(),
             KeyCode::Esc => {
                 self.lists_ui.adding = None;
-                self.lists_ui.input_buffer.clear();
+                self.lists_ui.add_focus = AddSourceField::Url;
+                self.lists_ui.name_buffer.clear();
+                self.lists_ui.url_buffer.clear();
             }
             _ => {}
+        }
+    }
+
+    fn add_buffer_mut(&mut self) -> &mut String {
+        match self.lists_ui.add_focus {
+            AddSourceField::Name => &mut self.lists_ui.name_buffer,
+            AddSourceField::Url => &mut self.lists_ui.url_buffer,
         }
     }
 
@@ -624,7 +647,9 @@ impl App {
             FilterRow::Add { job } => {
                 self.lists_ui.focus = job;
                 self.lists_ui.adding = Some(job);
-                self.lists_ui.input_buffer.clear();
+                self.lists_ui.add_focus = AddSourceField::Name;
+                self.lists_ui.name_buffer.clear();
+                self.lists_ui.url_buffer.clear();
             }
         }
     }
@@ -711,22 +736,25 @@ impl App {
         let Some(job) = self.lists_ui.adding else {
             return;
         };
-        let url = self.lists_ui.input_buffer.trim().to_string();
+        let url = self.lists_ui.url_buffer.trim().to_string();
         if url.is_empty() {
-            self.lists_ui.adding = None;
-            self.lists_ui.input_buffer.clear();
+            self.lists_ui.add_focus = AddSourceField::Url;
             return;
         }
+        let name = self.lists_ui.name_buffer.trim().to_string();
+        let name = (!name.is_empty()).then_some(name);
         let setting = match job {
             FilterJob::Block => &mut self.lists.block,
             FilterJob::Allow => &mut self.lists.allow,
         };
-        match setting.add_custom(url.clone()) {
+        match setting.add_custom(url.clone(), name) {
             Ok(()) => {
                 self.log_success(format!("Added {url}"));
                 self.lists_ui.focus = job;
                 self.lists_ui.adding = None;
-                self.lists_ui.input_buffer.clear();
+                self.lists_ui.add_focus = AddSourceField::Url;
+                self.lists_ui.name_buffer.clear();
+                self.lists_ui.url_buffer.clear();
                 let source_index = match job {
                     FilterJob::Block => self.lists.block.sources.len().saturating_sub(1),
                     FilterJob::Allow => self.lists.allow.sources.len().saturating_sub(1),

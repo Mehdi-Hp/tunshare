@@ -100,7 +100,17 @@ pub struct ListsUi {
     pub return_state: AppState,
     /// URL overlay for **Add source…**. `None` = browsing rows.
     pub adding: Option<FilterJob>,
-    pub input_buffer: String,
+    pub add_focus: AddSourceField,
+    pub name_buffer: String,
+    pub url_buffer: String,
+}
+
+/// Which field owns typing in the add-source overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddSourceField {
+    Name,
+    #[default]
+    Url,
 }
 
 impl Default for ListsUi {
@@ -115,7 +125,9 @@ impl Default for ListsUi {
             allow_fetched: None,
             return_state: AppState::Menu,
             adding: None,
-            input_buffer: String::new(),
+            add_focus: AddSourceField::Url,
+            name_buffer: String::new(),
+            url_buffer: String::new(),
         }
     }
 }
@@ -279,7 +291,7 @@ impl App {
             AppState::InstallDnsmasq => "Esc: Dismiss",
             AppState::PreflightBlocked => "r: Rescan  d: Doctor  Esc: Cancel",
             AppState::ViewingLists if self.lists_ui.adding.is_some() => {
-                "Enter: Add  Esc: Back  (https://…)"
+                "Tab: Field  Enter: Add  Esc: Back"
             }
             AppState::ViewingLists => {
                 "↑/↓: Navigate  Tab/←→: Column  Enter: Toggle  x: Remove  r: Refresh  Esc: Back"
