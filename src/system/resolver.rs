@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,7 @@ pub struct DnsServer {
     shutdown_tx: watch::Sender<bool>,
     lists: Arc<RwLock<ResolverLists>>,
     wan_upstream: Arc<std::sync::RwLock<Option<Resolver<BoundIfProvider>>>>,
+    blocked_queries: Arc<AtomicU64>,
 }
 
 impl DnsServer {
@@ -71,6 +73,7 @@ impl DnsServer {
 
         let lists = Arc::new(RwLock::new(lists));
         let bypass = Arc::new(tokio::sync::Mutex::new(HashMap::<Ipv4Addr, Instant>::new()));
+        let blocked_queries = Arc::new(AtomicU64::new(0));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let shared = Arc::new(ServerInner {
@@ -78,6 +81,7 @@ impl DnsServer {
             vpn_upstream,
             wan_upstream: wan_upstream.clone(),
             bypass: bypass.clone(),
+            blocked_queries: blocked_queries.clone(),
         });
 
         tokio::spawn(udp_loop(udp, shared.clone(), shutdown_rx.clone()));
@@ -88,11 +92,17 @@ impl DnsServer {
             shutdown_tx,
             lists,
             wan_upstream,
+            blocked_queries,
         })
     }
 
     pub fn lists(&self) -> Arc<RwLock<ResolverLists>> {
         self.lists.clone()
+    }
+
+    /// DNS queries answered NXDOMAIN this session because they hit Block.
+    pub fn blocked_queries(&self) -> u64 {
+        self.blocked_queries.load(Ordering::Relaxed)
     }
 
     /// Bind a WAN-path resolver. Needed when allowlist turns on after sharing started.
@@ -122,6 +132,7 @@ struct ServerInner {
     vpn_upstream: Resolver<TokioRuntimeProvider>,
     wan_upstream: Arc<std::sync::RwLock<Option<Resolver<BoundIfProvider>>>>,
     bypass: Arc<tokio::sync::Mutex<HashMap<Ipv4Addr, Instant>>>,
+    blocked_queries: Arc<AtomicU64>,
 }
 
 fn name_server_ips(servers: &[String]) -> Vec<IpAddr> {
@@ -289,7 +300,10 @@ async fn handle_query(inner: &ServerInner, bytes: &[u8]) -> Result<Vec<u8>> {
     let decision = classify(&qname, &lists);
 
     match decision {
-        Decision::Block => encode_nxdomain(&request),
+        Decision::Block => {
+            inner.blocked_queries.fetch_add(1, Ordering::Relaxed);
+            encode_nxdomain(&request)
+        }
         Decision::Allow => {
             if qtype == RecordType::AAAA {
                 return encode_nodata(&request);

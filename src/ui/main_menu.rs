@@ -886,14 +886,7 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
         area.height.saturating_sub(2),
     );
 
-    // Layout:
-    //  row 0: blank
-    //  row 1: VPN/LAN labels
-    //  row 2-4: interface boxes (3 rows)
-    //  row 5: blank
-    //  row 6: separator
-    //  row 7: blank
-    //  row 8-11: config rows (4 rows)
+    // Layout: diagram, then 7 config rows, then traffic (down, up, total, blocked).
 
     let diagram_start_y = inner.y + 1;
 
@@ -918,19 +911,29 @@ pub fn render_connection_info(frame: &mut Frame, area: Rect, app: &App) {
     let config_start_y = sep_y + 2;
     render_config_rows(frame, inner, config_start_y, &lan_ip, app);
 
-    // Traffic block: separator + blank + 3 rows (down, up, totals).
-    let traffic_sep_y = config_start_y + 5;
-    let traffic_block_end = traffic_sep_y + 5;
+    // Traffic: separator + blank + 4 rows. Paint what fits so short
+    // terminals keep Total/Blocked instead of dropping the whole block.
+    let traffic_sep_y = config_start_y + 7;
     if let Some(session) = app.session.as_ref() {
-        if traffic_block_end <= inner.y + inner.height {
+        if traffic_sep_y < inner.y + inner.height {
             render_separator_line(frame, inner, traffic_sep_y);
-            render_traffic_block(frame, inner, traffic_sep_y + 2, &session.traffic);
+            let blocked = session
+                .dns_server()
+                .map(crate::system::DnsServer::blocked_queries)
+                .unwrap_or(0);
+            render_traffic_block(frame, inner, traffic_sep_y + 2, &session.traffic, blocked);
         }
     }
 }
 
 /// Render the down/up/total traffic block at the given y.
-fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &TrafficStats) {
+fn render_traffic_block(
+    frame: &mut Frame,
+    inner: Rect,
+    start_y: u16,
+    stats: &TrafficStats,
+    blocked: u64,
+) {
     let padding = 3u16;
     let usable_width = inner.width.saturating_sub(padding * 2);
 
@@ -968,6 +971,9 @@ fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &Tr
             Style::default().fg(colors::TEXT_PRIMARY),
         ),
     ]);
+    if start_y >= inner.y + inner.height {
+        return;
+    }
     frame.render_widget(
         Paragraph::new(line_down),
         Rect::new(inner.x + padding, start_y, usable_width, 1),
@@ -986,6 +992,9 @@ fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &Tr
             Style::default().fg(colors::TEXT_PRIMARY),
         ),
     ]);
+    if start_y + 1 >= inner.y + inner.height {
+        return;
+    }
     frame.render_widget(
         Paragraph::new(line_up),
         Rect::new(inner.x + padding, start_y + 1, usable_width, 1),
@@ -1016,9 +1025,29 @@ fn render_traffic_block(frame: &mut Frame, inner: Rect, start_y: u16, stats: &Tr
     let gap = usable_width.saturating_sub(label_w + total_value_width);
     let mut spans = vec![total_label, Span::raw(" ".repeat(gap as usize))];
     spans.extend(total_value.spans);
+    if start_y + 3 < inner.y + inner.height {
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x + padding, start_y + 3, usable_width, 1),
+        );
+    }
+
+    if start_y + 4 >= inner.y + inner.height {
+        return;
+    }
+
+    let blocked_label = Span::styled("Blocked", Style::default().fg(colors::TEXT_SECONDARY));
+    let blocked_value = format!("{blocked} queries");
+    let blocked_w = blocked_value.chars().count() as u16;
+    let blocked_label_w = "Blocked".chars().count() as u16;
+    let blocked_gap = usable_width.saturating_sub(blocked_label_w + blocked_w);
     frame.render_widget(
-        Paragraph::new(Line::from(spans)),
-        Rect::new(inner.x + padding, start_y + 3, usable_width, 1),
+        Paragraph::new(Line::from(vec![
+            blocked_label,
+            Span::raw(" ".repeat(blocked_gap as usize)),
+            Span::styled(blocked_value, Style::default().fg(colors::TEXT_PRIMARY)),
+        ])),
+        Rect::new(inner.x + padding, start_y + 4, usable_width, 1),
     );
 }
 
@@ -1117,12 +1146,19 @@ fn render_config_rows(frame: &mut Frame, inner: Rect, start_y: u16, gateway: &st
         _ => "—".to_string(),
     };
 
+    let block_on = app.lists.block.enabled;
+    let wan_on = app.lists.allow.enabled;
+    let block_status = if block_on { "On" } else { "Off" };
+    let wan_status = if wan_on { "On" } else { "Off" };
+
     let config_items: &[(&str, String, bool)] = &[
         ("Gateway", gateway.to_string(), false),
         ("Tunnel", tunnel_str, false),
         ("DNS", dns_str, false),
         ("WAN", dhcp_status, dhcp_active),
         ("NAT-PMP", natpmp_status.to_string(), natpmp_active),
+        ("Block", block_status.to_string(), block_on),
+        ("WAN bypass", wan_status.to_string(), wan_on),
     ];
 
     let padding = 3u16;
