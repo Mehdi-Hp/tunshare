@@ -418,44 +418,46 @@ async fn restore_contract(
 
 async fn load_pfctl(args: &[&str]) -> Result<()> {
     let output = run_cmd("pfctl", args).await?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        let is_just_warning = stderr.contains("Use of -f option")
-            || stderr.contains("rules loaded")
-            || stderr.contains("pf enabled");
-        let stderr_lower = stderr.to_lowercase();
-        let has_real_error = stderr_lower.contains("syntax error")
-            || stderr_lower.contains("rules not loaded")
-            || stderr.contains("unknown")
-            || stderr.contains("invalid")
-            || stderr.contains("no valid");
-        if has_real_error && !is_just_warning {
-            return Err(TunshareError::FirewallError(format!(
-                "Failed to load rules: {}",
-                stderr.trim()
-            )));
-        }
-    }
-    Ok(())
+    interpret_pfctl(&output, "Failed to load rules")
 }
 
 async fn validate_pfctl(args: &[&str]) -> Result<()> {
     let output = run_cmd("pfctl", args).await?;
+    interpret_pfctl(&output, "Rule validation failed")
+}
+
+fn interpret_pfctl(output: &std::process::Output, prefix: &str) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        let has_error = stderr.contains("syntax error")
-            || stderr.contains("unknown")
-            || stderr.contains("invalid")
-            || stderr.contains("no valid")
-            || (stderr.contains("error") && !stderr.contains("0 errors"));
-        if has_error {
-            return Err(TunshareError::FirewallError(format!(
-                "Rule validation failed: {}",
-                stderr.trim()
-            )));
-        }
+    if pfctl_syntax_error(&stderr) || (!output.status.success() && !pfctl_f_warning_only(&stderr)) {
+        return Err(TunshareError::FirewallError(format!(
+            "{prefix}: {}",
+            stderr.trim()
+        )));
     }
     Ok(())
+}
+
+fn pfctl_syntax_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("syntax error")
+        || lower.contains("rules not loaded")
+        || lower.contains("rules must be in order")
+}
+
+fn pfctl_f_warning_only(stderr: &str) -> bool {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty()
+            || line.contains("Use of -f option")
+            || line.contains("No ALTQ support")
+            || line.contains("ALTQ related functions disabled")
+            || line.contains("pf enabled")
+            || line.contains("rules loaded")
+    })
 }
 
 async fn snapshot_main_async() -> Result<String> {
@@ -508,52 +510,107 @@ fn flush_anchor_sync(name: &str) {
 }
 
 /// MAIN after stripping leftover tunshare lines, plus skip + hooks.
+///
+/// Apple pf requires section order: options → normalization → translation →
+/// filtering. `pfctl -sr` dumps `scrub-anchor` with filters, so a naive
+/// split puts it after `nat-anchor` and `-f` rejects the file at line 10.
 fn merge_main(existing: &str) -> String {
-    let mut options = String::new();
-    let mut nat = String::new();
-    let mut filter = String::new();
-    let mut in_filter = false;
+    let buckets = bucket_main_lines(existing);
+    assemble_main(&buckets, true)
+}
+
+/// Same buckets as merge, without tunshare hooks. Stop uses this so we do
+/// not re-inject `com.tunshare` while putting Apple `scrub-anchor` first.
+fn order_main(existing: &str) -> String {
+    let buckets = bucket_main_lines(existing);
+    assemble_main(&buckets, false)
+}
+
+struct MainBuckets {
+    options: String,
+    scrub: String,
+    queue: String,
+    nat: String,
+    filter: String,
+}
+
+fn bucket_main_lines(existing: &str) -> MainBuckets {
+    let mut buckets = MainBuckets {
+        options: String::from("set skip on lo0\n"),
+        scrub: String::new(),
+        queue: String::new(),
+        nat: String::new(),
+        filter: String::new(),
+    };
     for line in existing.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || is_tunshare_main_line(trimmed) {
             continue;
         }
-        if trimmed.starts_with("set ") {
-            options.push_str(trimmed);
-            options.push('\n');
-            continue;
-        }
-        // pfctl -sr lines are pass/block/anchor/scrub; -sn is nat/rdr.
-        if !in_filter
-            && (trimmed.starts_with("pass ")
-                || trimmed.starts_with("block ")
-                || trimmed.starts_with("anchor ")
-                || trimmed.starts_with("scrub "))
-        {
-            in_filter = true;
-        }
-        if in_filter {
-            filter.push_str(trimmed);
-            filter.push('\n');
-        } else {
-            nat.push_str(trimmed);
-            nat.push('\n');
-        }
+        let dest = match classify_main_line(trimmed) {
+            MainSection::Options => &mut buckets.options,
+            MainSection::Scrub => &mut buckets.scrub,
+            MainSection::Queue => &mut buckets.queue,
+            MainSection::Nat => &mut buckets.nat,
+            MainSection::Filter => &mut buckets.filter,
+        };
+        dest.push_str(trimmed);
+        dest.push('\n');
     }
+    buckets
+}
 
-    let mut out = String::from("set skip on lo0\n");
-    out.push_str(&options);
-    for hook in &MAIN_HOOKS[..4] {
-        out.push_str(hook);
-        out.push('\n');
+fn assemble_main(buckets: &MainBuckets, inject_hooks: bool) -> String {
+    let mut out = buckets.options.clone();
+    out.push_str(&buckets.scrub);
+    out.push_str(&buckets.queue);
+    if inject_hooks {
+        for hook in &Firewall::main_hooks()[..4] {
+            out.push_str(hook);
+            out.push('\n');
+        }
     }
-    out.push_str(&nat);
-    for hook in &MAIN_HOOKS[4..] {
-        out.push_str(hook);
-        out.push('\n');
+    out.push_str(&buckets.nat);
+    if inject_hooks {
+        for hook in &Firewall::main_hooks()[4..] {
+            out.push_str(hook);
+            out.push('\n');
+        }
     }
-    out.push_str(&filter);
+    out.push_str(&buckets.filter);
     out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainSection {
+    Options,
+    Scrub,
+    Queue,
+    Nat,
+    Filter,
+}
+
+fn classify_main_line(line: &str) -> MainSection {
+    if line.starts_with("set ") {
+        MainSection::Options
+    } else if line.starts_with("scrub ") || line.starts_with("scrub-anchor ") {
+        MainSection::Scrub
+    } else if line.starts_with("dummynet")
+        || line.starts_with("altq ")
+        || line.starts_with("queue ")
+    {
+        MainSection::Queue
+    } else if line.starts_with("nat ")
+        || line.starts_with("rdr ")
+        || line.starts_with("binat ")
+        || line.starts_with("nat-anchor ")
+        || line.starts_with("rdr-anchor ")
+        || line.starts_with("binat-anchor ")
+    {
+        MainSection::Nat
+    } else {
+        MainSection::Filter
+    }
 }
 
 fn is_tunshare_main_line(line: &str) -> bool {
@@ -773,25 +830,20 @@ fn cleanup_sync_impl(config_path: &str) -> Result<()> {
                 .args(["-f", DEFAULT_PF_CONF])
                 .output();
             if let Ok(output) = output {
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stderr.contains("rules loaded") && stderr.contains("error") {
-                        errors.push(format!("Failed to restore default rules: {stderr}"));
-                    }
+                if let Err(error) = interpret_pfctl(&output, "Failed to restore default rules") {
+                    errors.push(error.to_string());
                 }
             }
         }
     } else {
-        let _ = fs::write(PF_MAIN_PATH, &stripped);
+        let ordered = order_main(&stripped);
+        let _ = fs::write(PF_MAIN_PATH, &ordered);
         let output = SyncCommand::new("pfctl")
             .args(["-f", PF_MAIN_PATH])
             .output();
         if let Ok(output) = output {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("rules loaded") && stderr.contains("error") {
-                    errors.push(format!("Failed to strip MAIN hooks: {stderr}"));
-                }
+            if let Err(error) = interpret_pfctl(&output, "Failed to strip MAIN hooks") {
+                errors.push(error.to_string());
             }
         }
     }
@@ -908,6 +960,67 @@ pass in quick on en8 proto tcp from any to any port 443 keep state
             1,
             "hooks must stay unique on re-merge"
         );
+    }
+
+    #[test]
+    fn merge_main_keeps_apple_scrub_anchor_before_nat() {
+        let existing = r#"
+scrub-anchor "com.apple/*" all
+nat-anchor "com.apple/*"
+rdr-anchor "com.apple/*"
+anchor "com.apple/*"
+dummynet-anchor "com.apple/*"
+"#;
+        let merged = Firewall::merge_main(existing);
+        let line_at = |needle: &str| -> usize {
+            merged
+                .lines()
+                .scan(0usize, |offset, line| {
+                    let start = *offset;
+                    *offset += line.len() + 1;
+                    Some((start, line))
+                })
+                .find(|(_, line)| *line == needle)
+                .map(|(start, _)| start)
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        let scrub = line_at("scrub-anchor \"com.apple/*\" all");
+        let nat_hook = line_at("nat-anchor \"com.tunshare\"");
+        let apple_nat = line_at("nat-anchor \"com.apple/*\"");
+        let filter_hook = line_at("anchor \"com.tunshare\"");
+        let apple_filter = line_at("anchor \"com.apple/*\"");
+        assert!(scrub < nat_hook, "scrub must precede translation");
+        assert!(nat_hook < apple_nat);
+        assert!(apple_nat < filter_hook);
+        assert!(filter_hook < apple_filter);
+        let dummy = merged.find("dummynet-anchor").expect("dummynet");
+        assert!(dummy < nat_hook, "queueing must precede translation");
+        let stopped = order_main(existing);
+        assert!(!stopped.contains("com.tunshare"));
+        assert!(stopped.find("scrub-anchor").unwrap() < stopped.find("nat-anchor").unwrap());
+        assert!(stopped.find("dummynet-anchor").unwrap() < stopped.find("nat-anchor").unwrap());
+    }
+
+    #[test]
+    fn pfctl_warning_does_not_hide_syntax_error() {
+        let stderr = "\
+Use of -f option, could result in flushing of rules
+present in the main ruleset added by the system at startup.
+See /etc/pf.conf for further details.
+No ALTQ support in kernel
+ALTQ related functions disabled
+/tmp/tunshare_pf_main.conf:10: Rules must be in order: options, normalization, queueing, translation, filtering
+pfctl: Syntax error in config file: pf rules not loaded
+";
+        assert!(pfctl_syntax_error(stderr));
+        assert!(!pfctl_f_warning_only(stderr));
+        let warning_only = "\
+Use of -f option, could result in flushing of rules
+No ALTQ support in kernel
+ALTQ related functions disabled
+";
+        assert!(pfctl_f_warning_only(warning_only));
+        assert!(!pfctl_syntax_error(warning_only));
     }
 
     #[test]
