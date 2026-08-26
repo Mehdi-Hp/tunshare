@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError, NoRecords};
 use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_resolver::proto::rr::{RData, Record, RecordType};
 use hickory_resolver::proto::serialize::binary::{BinDecodable, BinEncodable};
@@ -302,11 +303,11 @@ async fn handle_query(inner: &ServerInner, bytes: &[u8]) -> Result<Vec<u8>> {
     match decision {
         Decision::Block => {
             inner.blocked_queries.fetch_add(1, Ordering::Relaxed);
-            encode_nxdomain(&request)
+            encode_nxdomain(&request, Vec::new())
         }
         Decision::Allow => {
             if qtype == RecordType::AAAA {
-                return encode_nodata(&request);
+                return encode_nodata(&request, Vec::new());
             }
             let wan = inner
                 .wan_upstream
@@ -316,14 +317,22 @@ async fn handle_query(inner: &ServerInner, bytes: &[u8]) -> Result<Vec<u8>> {
             let Some(wan) = wan else {
                 return encode_servfail(&request);
             };
-            match lookup_and_bypass(&wan, inner, &qname, qtype).await {
-                Ok(records) => encode_answers(&request, records),
-                Err(_) => encode_servfail(&request),
+            match wan.lookup(&qname, qtype).await {
+                Ok(lookup) => {
+                    if let Err(error) = install_bypass(inner, lookup.answers()).await {
+                        tracing::debug!(
+                            "[Resolver] bypass table add failed for <{qname}> {qtype}: {error}"
+                        );
+                        return encode_servfail(&request);
+                    }
+                    encode_answers(&request, lookup.answers().to_vec())
+                }
+                Err(error) => encode_lookup_error(&request, &qname, qtype, error),
             }
         }
         Decision::Vpn => match inner.vpn_upstream.lookup(&qname, qtype).await {
             Ok(lookup) => encode_lookup(&request, lookup.message()),
-            Err(_) => encode_servfail(&request),
+            Err(error) => encode_lookup_error(&request, &qname, qtype, error),
         },
     }
 }
@@ -346,17 +355,7 @@ fn classify(qname: &str, lists: &ResolverLists) -> Decision {
     Decision::Vpn
 }
 
-async fn lookup_and_bypass(
-    wan: &Resolver<BoundIfProvider>,
-    inner: &ServerInner,
-    qname: &str,
-    qtype: RecordType,
-) -> Result<Vec<Record>> {
-    let lookup = wan
-        .lookup(qname, qtype)
-        .await
-        .map_err(|error| TunshareError::Resolver(error.to_string()))?;
-    let records: Vec<Record> = lookup.answers().to_vec();
+async fn install_bypass(inner: &ServerInner, records: &[Record]) -> Result<()> {
     let ips: Vec<Ipv4Addr> = records
         .iter()
         .filter_map(|record| match record.data {
@@ -364,15 +363,54 @@ async fn lookup_and_bypass(
             _ => None,
         })
         .collect();
-    if !ips.is_empty() {
-        Firewall::table_add(&ips)?;
-        let expiry = Instant::now() + BYPASS_TTL;
-        let mut map = inner.bypass.lock().await;
-        for ip in ips {
-            map.insert(ip, expiry);
+    if ips.is_empty() {
+        return Ok(());
+    }
+    Firewall::table_add(&ips)?;
+    let expiry = Instant::now() + BYPASS_TTL;
+    let mut map = inner.bypass.lock().await;
+    for ip in ips {
+        map.insert(ip, expiry);
+    }
+    Ok(())
+}
+
+fn encode_lookup_error(
+    request: &Message,
+    qname: &str,
+    qtype: RecordType,
+    error: NetError,
+) -> Result<Vec<u8>> {
+    match error {
+        NetError::Dns(DnsError::NoRecordsFound(no_records)) => {
+            let code = no_records.response_code;
+            let authorities = authorities_from_no_records(no_records);
+            match code {
+                ResponseCode::NXDomain => encode_nxdomain(request, authorities),
+                ResponseCode::NoError => encode_nodata(request, authorities),
+                code => {
+                    tracing::debug!(
+                        "[Resolver] unexpected NoRecordsFound code {code} for <{qname}> {qtype}"
+                    );
+                    encode_servfail(request)
+                }
+            }
+        }
+        error => {
+            tracing::debug!("[Resolver] upstream lookup failed for <{qname}> {qtype}: {error}");
+            encode_servfail(request)
         }
     }
-    Ok(records)
+}
+
+fn authorities_from_no_records(no_records: NoRecords) -> Vec<Record> {
+    if let Some(authorities) = no_records.authorities {
+        return authorities.to_vec();
+    }
+    no_records
+        .soa
+        .map(|soa| vec![soa.into_record_of_rdata()])
+        .unwrap_or_default()
 }
 
 fn encode_lookup(request: &Message, upstream: &Message) -> Result<Vec<u8>> {
@@ -388,14 +426,17 @@ fn encode_answers(request: &Message, answers: Vec<Record>) -> Result<Vec<u8>> {
     encode(&response)
 }
 
-fn encode_nxdomain(request: &Message) -> Result<Vec<u8>> {
+fn encode_nxdomain(request: &Message, authorities: Vec<Record>) -> Result<Vec<u8>> {
     let mut response = base_response(request);
     response.metadata.response_code = ResponseCode::NXDomain;
+    response.authorities = authorities;
     encode(&response)
 }
 
-fn encode_nodata(request: &Message) -> Result<Vec<u8>> {
-    encode(&base_response(request))
+fn encode_nodata(request: &Message, authorities: Vec<Record>) -> Result<Vec<u8>> {
+    let mut response = base_response(request);
+    response.authorities = authorities;
+    encode(&response)
 }
 
 fn encode_servfail(request: &Message) -> Result<Vec<u8>> {
@@ -422,7 +463,10 @@ fn encode(message: &Message) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::system::lists::parse_list_body;
+    use hickory_resolver::proto::op::Query;
+    use hickory_resolver::proto::rr::{rdata::SOA, Name};
     use std::collections::HashSet;
+    use std::str::FromStr;
 
     fn lists(block: &[&str], allow: &[&str]) -> ResolverLists {
         let mut block_set = HashSet::new();
@@ -435,6 +479,40 @@ mod tests {
             block_enabled: true,
             allow_enabled: true,
         }
+    }
+
+    fn name(value: &str) -> Name {
+        Name::from_str(value).expect("test name")
+    }
+
+    fn query_message(qname: &str, qtype: RecordType) -> Message {
+        let mut request = Message::query();
+        request.queries.push(Query::query(name(qname), qtype));
+        request
+    }
+
+    fn no_records_error(qname: &str, qtype: RecordType, code: ResponseCode) -> NetError {
+        let mut no_records = NoRecords::new(Query::query(name(qname), qtype), code);
+        let soa = SOA::new(
+            name("ns.example."),
+            name("hostmaster.example."),
+            1,
+            3600,
+            600,
+            86400,
+            1800,
+        );
+        no_records.soa = Some(Box::new(Record::from_rdata(name("example."), 1800, soa)));
+        NetError::from(no_records)
+    }
+
+    fn decode(bytes: &[u8]) -> Message {
+        Message::from_bytes(bytes).expect("response decodes")
+    }
+
+    fn respond(qname: &str, qtype: RecordType, error: NetError) -> Message {
+        let request = query_message(qname, qtype);
+        decode(&encode_lookup_error(&request, qname, qtype, error).expect("encode"))
     }
 
     #[test]
@@ -452,5 +530,61 @@ mod tests {
         assert_eq!(classify("ads.example.com", &lists), Decision::Vpn);
         lists.allow_enabled = false;
         assert_eq!(classify("shop.digikala.com", &lists), Decision::Vpn);
+    }
+
+    #[test]
+    fn no_records_noerror_is_nodata_with_soa() {
+        let qname = "gym.example.";
+        let response = respond(
+            qname,
+            RecordType::CNAME,
+            no_records_error(qname, RecordType::CNAME, ResponseCode::NoError),
+        );
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        assert!(response.answers.is_empty());
+        assert_eq!(response.authorities.len(), 1);
+        assert!(matches!(response.authorities[0].data, RData::SOA(_)));
+    }
+
+    #[test]
+    fn no_records_noerror_without_soa_is_nodata() {
+        let qname = "gym.example.";
+        let error = NetError::from(NoRecords::new(
+            Query::query(name(qname), RecordType::CNAME),
+            ResponseCode::NoError,
+        ));
+        let response = respond(qname, RecordType::CNAME, error);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        assert!(response.answers.is_empty());
+        assert!(response.authorities.is_empty());
+    }
+
+    #[test]
+    fn no_records_nxdomain_is_nxdomain_with_soa() {
+        let qname = "missing.example.";
+        let response = respond(
+            qname,
+            RecordType::A,
+            no_records_error(qname, RecordType::A, ResponseCode::NXDomain),
+        );
+        assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
+        assert!(response.answers.is_empty());
+        assert_eq!(response.authorities.len(), 1);
+        assert!(matches!(response.authorities[0].data, RData::SOA(_)));
+    }
+
+    #[test]
+    fn timeout_and_io_and_servfail_are_servfail() {
+        let qname = "gym.example.";
+        for error in [
+            NetError::Timeout,
+            NetError::from(std::io::Error::other("upstream closed")),
+            NetError::Dns(DnsError::ResponseCode(ResponseCode::ServFail)),
+        ] {
+            let response = respond(qname, RecordType::A, error);
+            assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+            assert!(response.answers.is_empty());
+            assert!(response.authorities.is_empty());
+        }
     }
 }
